@@ -1,0 +1,157 @@
+<!-- node_index.html -->
+<!-- 
+  Minimal Node dashboard page to see pending transactions, 
+  manually mine a block, and view the entire chain.
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Blockchain Node - Index</title>
+  <link rel="stylesheet" href="/static/vendor/bootstrap/css/bootstrap.min.css">
+</head>
+<body class="bg-light">
+
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+  <a class="navbar-brand" href="/">Blockchain Node</a>
+  <div class="collapse navbar-collapse">
+    <ul class="navbar-nav ml-auto">
+      <li class="nav-item active">
+        <a class="nav-link" href="/">Home</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="/configure">Configure</a>
+      </li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container mt-5">
+
+  <h2>Node Dashboard</h2>
+  <p>Minimal page for the Node to display pending transactions and chain details.</p>
+
+  <hr>
+  <h4>Pending transactions</h4>
+  <button id="refreshBtn" class="btn btn-secondary mb-3">Refresh</button>
+
+  <table class="table table-bordered">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Sender Alias</th>
+        <th>Recipient Alias</th>
+        <th>File Name</th>
+        <th>File Path</th>
+      </tr>
+    </thead>
+    <tbody id="pendingBody"></tbody>
+  </table>
+
+  <button id="mineBtn" class="btn btn-primary mt-2">Mine Block (manually)</button>
+  <div id="mineResult" class="alert mt-3 d-none"></div>
+
+  <hr>
+  <h4>Show Blockchain</h4>
+  <button id="showChainBtn" class="btn btn-info mb-3">Show Chain</button>
+  <pre id="chainOutput" class="bg-white p-3" style="max-height: 400px; overflow-y: auto;"></pre>
+</div>
+
+<script src="/static/vendor/jquery/jquery.min.js"></script>
+<script src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+
+  const refreshBtn  = document.getElementById('refreshBtn');
+  const pendingBody = document.getElementById('pendingBody');
+  const mineBtn     = document.getElementById('mineBtn');
+  const mineResult  = document.getElementById('mineResult');
+  const showChainBtn= document.getElementById('showChainBtn');
+  const chainOutput = document.getElementById('chainOutput');
+
+  // Load pending transactions
+  function loadPending() {
+    fetch('/transactions/get')
+      .then(r => {
+        if (!r.ok) throw new Error("Failed to load transactions");
+        return r.json();
+      })
+      .then(data => {
+        pendingBody.innerHTML = '';
+        const txs = data.transactions || [];
+        if (txs.length === 0) {
+          pendingBody.innerHTML = `
+            <tr>
+              <td colspan="5" class="text-center">No pending transactions</td>
+            </tr>
+          `;
+          return;
+        }
+        txs.forEach((tx, i) => {
+          const row = `
+            <tr>
+              <td>${i+1}</td>
+              <td>${tx.alias || ""}</td>
+              <td>${tx.recipient_alias || ""}</td>
+              <td>${tx.file_name || ""}</td>
+              <td>${tx.file_path || ""}</td>
+            </tr>
+          `;
+          pendingBody.insertAdjacentHTML('beforeend', row);
+        });
+      })
+      .catch(() => {
+        alert("Failed to load pending transactions.");
+      });
+  }
+
+  // Manual mine
+  function mineBlock() {
+    fetch('/mine')
+      .then(r => {
+        if (!r.ok) throw new Error("Error in mine");
+        return r.json();
+      })
+      .then(resp => {
+        mineResult.classList.remove('d-none','alert-danger');
+        mineResult.classList.add('alert','alert-success');
+        mineResult.textContent = `New block mined! Block index: ${resp.index}`;
+        loadPending();
+      })
+      .catch(e => {
+        mineResult.classList.remove('d-none','alert-success');
+        mineResult.classList.add('alert','alert-danger');
+        mineResult.textContent = "Error mining block.";
+      });
+  }
+
+  // Show the chain
+  function showChain() {
+    fetch('/chain')
+      .then(r => {
+        if(!r.ok) throw new Error("Failed to load chain");
+        return r.json();
+      })
+      .then(data => {
+        chainOutput.textContent = JSON.stringify(data, null, 2);
+      })
+      .catch(() => {
+        chainOutput.textContent = "Failed to load chain.";
+      });
+  }
+
+  refreshBtn.addEventListener('click', loadPending);
+  mineBtn.addEventListener('click', mineBlock);
+  showChainBtn.addEventListener('click', showChain);
+
+  // Load pending transactions immediately
+  loadPending();
+
+  // Optionally set an auto-refresh interval for pending transactions
+  setInterval(loadPending, 10000);
+
+});
+</script>
+</body>
+</html>

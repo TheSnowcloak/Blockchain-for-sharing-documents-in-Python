@@ -1,0 +1,268 @@
+<!-- view_transactions.html -->
+<!-- 
+  Displays all transactions from the blockchain node.
+  Allows filtering, and shows "SENSITIVE - hidden" for files marked is_sensitive=1.
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Blockchain Client - View Transactions</title>
+  <!-- Bootstrap CSS -->
+  <link rel="stylesheet" href="/static/vendor/bootstrap/css/bootstrap.min.css">
+  <style>
+    .addr-short {
+      color: blue;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .file-link {
+      color: #0c6efc;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .search-container {
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 1rem;
+    }
+    .search-container input {
+      width: 300px;
+      margin-right: 8px;
+    }
+  </style>
+</head>
+<body class="bg-light">
+
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+  <a class="navbar-brand" href="/">Blockchain Client</a>
+  <div class="collapse navbar-collapse" id="navbarSupportedContent">
+    <ul class="navbar-nav ml-auto">
+      <li class="nav-item">
+        <a class="nav-link" href="/">Home</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="/upload">Upload File</a>
+      </li>
+      <li class="nav-item active">
+        <a class="nav-link" href="/view/transactions">View Transactions <span class="sr-only">(current)</span></a>
+      </li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container mt-5">
+  <h2>Seznam transakcí v celém blockchainu</h2>
+
+  <div class="search-container">
+    <input id="searchInput" type="text" class="form-control" placeholder="Hledat v transakcích (alias, file, adresa...)">
+    <button id="searchBtn" class="btn btn-secondary">Hledat</button>
+    <button id="loadChainBtn" class="btn btn-primary ml-2">
+      Načíst Chain z Node
+    </button>
+  </div>
+
+  <table class="table table-bordered">
+    <thead>
+      <tr>
+        <th>Block #</th>
+        <th>Sender</th>
+        <th>Recipient</th>
+        <th>File Name</th>
+        <th>Alias Sender</th>
+        <th>Alias Recipient</th>
+        <th>Timestamp</th>
+      </tr>
+    </thead>
+    <tbody id="txBody"></tbody>
+  </table>
+</div>
+
+<script src="/static/vendor/jquery/jquery.min.js"></script>
+<script src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
+<script>
+const nodeUrl = "http://127.0.0.1:5000/";
+let allTransactions = [];
+
+// Simple function to shorten a public key address in hex form
+function shortenAddress(addr) {
+  if (!addr) return '';
+  if (addr === "THE BLOCKCHAIN") return addr;
+
+  const prefixSkip = 58;
+  const suffixSkip = 10;
+  const middleLength = 20;
+
+  if (addr.length <= prefixSkip + suffixSkip) {
+    return addr;
+  }
+
+  const middleStart = prefixSkip;
+  const middleEnd   = prefixSkip + middleLength;
+  const middlePart  = addr.slice(middleStart, middleEnd);
+
+  return "..." + middlePart + "...";
+}
+
+function copyToClipboard(text) {
+  if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(() => alert("Adresa byla zkopírována do schránky."))
+      .catch(err => {
+        console.warn("Clipboard error => fallback", err);
+        fallbackCopyText(text);
+      });
+  } else {
+    fallbackCopyText(text);
+  }
+}
+
+function fallbackCopyText(text) {
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.left = "-99999px";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    alert("Adresa zkopírována do schránky.");
+  } catch (e) {
+    alert("Nepodařilo se zkopírovat do schránky: " + e);
+  }
+}
+
+function renderTxRow(blockIndex, blockTimestamp, tx) {
+  let senderCell;
+  if (tx.sender === "THE BLOCKCHAIN") {
+    senderCell = "THE BLOCKCHAIN";
+  } else {
+    const short = shortenAddress(tx.sender);
+    senderCell = `<span class="addr-short" data-full="${tx.sender}">${short}</span>`;
+  }
+
+  let recipientCell;
+  if (!tx.recipient || tx.recipient === "THE BLOCKCHAIN") {
+    recipientCell = tx.recipient || "";
+  } else {
+    const rShort = shortenAddress(tx.recipient);
+    recipientCell = `<span class="addr-short" data-full="${tx.recipient}">${rShort}</span>`;
+  }
+
+  let fileCell = "";
+  // If is_sensitive="1", do not show the file link
+  if (tx.is_sensitive === "1") {
+    fileCell = `<span style="color:red;">(CITLIVÝ - skrytý)</span>`;
+  } else {
+    if (tx.file_name) {
+      fileCell = `<span class="file-link" data-file="${tx.file_name}">${tx.file_name}</span>`;
+    }
+  }
+
+  return `
+    <tr>
+      <td>${blockIndex}</td>
+      <td>${senderCell}</td>
+      <td>${recipientCell}</td>
+      <td>${fileCell}</td>
+      <td>${tx.alias || ""}</td>
+      <td>${tx.recipient_alias || ""}</td>
+      <td>${blockTimestamp || ""}</td>
+    </tr>
+  `;
+}
+
+function renderTxList(transactions) {
+  const txBody = document.getElementById('txBody');
+  txBody.innerHTML = '';
+  
+  transactions.forEach(t => {
+    txBody.insertAdjacentHTML('beforeend', 
+      renderTxRow(t.blockIndex, t.blockTimestamp, t)
+    );
+  });
+}
+
+async function loadChain() {
+  try {
+    const res = await fetch(nodeUrl + "/chain");
+    if (!res.ok) throw new Error("Chyba fetch /chain => status " + res.status);
+    const data = await res.json();
+    const chain = data.chain || [];
+
+    const txArray = [];
+    chain.forEach(block => {
+      const bIndex = block.index;
+      const bTime  = block.timestamp;
+      (block.transactions || []).forEach(tx => {
+        txArray.push({
+          ...tx,
+          blockIndex: bIndex,
+          blockTimestamp: bTime
+        });
+      });
+    });
+
+    allTransactions = txArray;
+    renderTxList(allTransactions);
+
+  } catch (e) {
+    alert("Nepodařilo se načíst chain: " + e);
+  }
+}
+
+function matchesTransaction(tx, searchText) {
+  const st = searchText.toLowerCase();
+  const combined = `
+    ${tx.sender}
+    ${tx.recipient}
+    ${tx.file_name}
+    ${tx.alias}
+    ${tx.recipient_alias}
+    ${tx.blockTimestamp}
+  `.toLowerCase();
+
+  return combined.includes(st);
+}
+
+function applySearchFilter() {
+  const input = document.getElementById('searchInput');
+  const searchValue = input.value.trim().toLowerCase();
+
+  if (!searchValue) {
+    renderTxList(allTransactions);
+    return;
+  }
+  const filtered = allTransactions.filter(tx => matchesTransaction(tx, searchValue));
+  renderTxList(filtered);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const loadChainBtn = document.getElementById('loadChainBtn');
+  const searchBtn    = document.getElementById('searchBtn');
+  const searchInput  = document.getElementById('searchInput');
+  const txBody       = document.getElementById('txBody');
+
+  loadChainBtn.addEventListener('click', loadChain);
+  searchBtn.addEventListener('click', applySearchFilter);
+
+  loadChain(); // initial load
+
+  document.body.addEventListener('click', (evt) => {
+    if (evt.target.classList.contains('addr-short')) {
+      const full = evt.target.getAttribute('data-full');
+      if (full) copyToClipboard(full);
+    }
+    if (evt.target.classList.contains('file-link')) {
+      const fname = evt.target.getAttribute('data-file');
+      if (fname) {
+        window.open(nodeUrl + "/file/" + fname, "_blank");
+      }
+    }
+  });
+});
+</script>
+</body>
+</html>

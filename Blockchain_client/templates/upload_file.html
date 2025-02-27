@@ -1,0 +1,122 @@
+<!-- upload_file.html -->
+<!-- 
+  Displays a form for uploading a file from the client side,
+  along with public/private keys, recipient key, etc.
+  The user can mark the file as "sensitive" to encrypt it.
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Upload Document from Client</title>
+  <link rel="stylesheet" href="/static/vendor/bootstrap/css/bootstrap.min.css">
+</head>
+<body class="bg-light">
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+  <a class="navbar-brand" href="/">Blockchain Client</a>
+  <div class="collapse navbar-collapse">
+    <ul class="navbar-nav ml-auto">
+      <li class="nav-item">
+        <a class="nav-link" href="/">Home</a>
+      </li>
+      <li class="nav-item active">
+        <a class="nav-link" href="/upload">Upload File <span class="sr-only">(current)</span></a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="/view/transactions">View Transactions</a>
+      </li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container mt-5">
+  <h2>Nahrát soubor a podepsat transakci (Client-Side signing v Pythonu)</h2>
+
+  <!-- The form for uploading file, specifying keys, etc. -->
+  <form id="uploadForm" enctype="multipart/form-data">
+    <div class="form-group">
+      <label>Sender Public Key (hex)</label>
+      <input type="text" name="sender_public_key" class="form-control" required>
+    </div>
+    <div class="form-group">
+      <label>Sender Private Key (hex)</label>
+      <input type="text" name="sender_private_key" class="form-control" required>
+    </div>
+    <div class="form-group">
+      <label>Recipient Public Key (hex)</label>
+      <input type="text" name="recipient_public_key" class="form-control" required>
+    </div>
+
+    <div class="form-group">
+      <label>Sender Alias</label>
+      <input type="text" name="sender_alias" class="form-control">
+    </div>
+    <div class="form-group">
+      <label>Recipient Alias</label>
+      <input type="text" name="recipient_alias" class="form-control">
+    </div>
+
+    <div class="form-group">
+      <label>File</label>
+      <input type="file" name="file" class="form-control-file" required>
+    </div>
+
+    <!-- Checkbox for marking file as sensitive (encryption) -->
+    <div class="form-check">
+      <input class="form-check-input" type="checkbox" id="is_sensitive" name="is_sensitive" value="1">
+      <label class="form-check-label" for="is_sensitive">
+        Zašifrovat soubor (citlivé)
+      </label>
+    </div>
+    <br>
+
+    <button type="submit" class="btn btn-primary">Odeslat (podepsat)</button>
+  </form>
+
+  <div id="resultBox" class="alert mt-3 d-none"></div>
+</div>
+
+<script src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const form = document.getElementById('uploadForm');
+  const resultBox = document.getElementById('resultBox');
+
+  // Handle the form submission via AJAX/Fetch
+  form.addEventListener('submit', evt => {
+    evt.preventDefault();
+
+    const formData = new FormData(form);
+
+    fetch('/upload', {
+      method: 'POST',
+      body: formData
+    })
+    .then(res => {
+      if (!res.ok) {
+        return res.text().then(t => {
+          throw new Error(t);
+        });
+      }
+      return res.json();
+    })
+    .then(resp => {
+      resultBox.classList.remove('d-none','alert-danger');
+      resultBox.classList.add('alert','alert-success');
+      if (resp.message) {
+        resultBox.textContent = "OK: " + resp.message;
+      } else {
+        resultBox.textContent = JSON.stringify(resp);
+      }
+    })
+    .catch(err => {
+      resultBox.classList.remove('d-none','alert-success');
+      resultBox.classList.add('alert','alert-danger');
+      resultBox.textContent = "Chyba: " + err;
+    });
+  });
+});
+</script>
+</body>
+</html>

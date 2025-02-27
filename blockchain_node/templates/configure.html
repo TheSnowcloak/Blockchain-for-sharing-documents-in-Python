@@ -1,0 +1,201 @@
+<!-- configure.html -->
+<!-- 
+  A Node configuration page: you can add new nodes (IP:port) or remove them,
+  see if they respond to /ping. 
+  This is relevant for establishing your network's nodes.
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Blockchain Node - Configure</title>
+  <link rel="stylesheet" href="/static/vendor/bootstrap/css/bootstrap.min.css">
+  <style>
+    .online-indicator {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+    .online {
+      background-color: green;
+    }
+    .offline {
+      background-color: red;
+    }
+  </style>
+</head>
+<body class="bg-light">
+
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+  <a class="navbar-brand" href="/">Blockchain Node</a>
+  <button class="navbar-toggler" type="button" data-toggle="collapse"
+          data-target="#navbarSupportedContent" aria-controls="navbarSupportedContent"
+          aria-expanded="false" aria-label="Toggle navigation">
+    <span class="navbar-toggler-icon"></span>
+  </button>
+
+  <div class="collapse navbar-collapse" id="navbarSupportedContent">
+    <ul class="navbar-nav ml-auto">
+      <!-- Link to home  -->
+      <li class="nav-item">
+        <a class="nav-link" href="/">Home</a>
+      </li>
+
+      <!-- Link to configure page (current) -->
+      <li class="nav-item active">
+        <a class="nav-link" href="/configure">Configure <span class="sr-only">(current)</span></a>
+      </li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container mt-5">
+  <h2>Konfigurace uzlů</h2>
+  <p>Přidávat / odebírat nody, check, jestli jsou online (/ping)</p>
+
+  <!-- Adding new nodes -->
+  <div class="form-group">
+    <label for="nodesInput">Node URLs (comma-separated):</label>
+    <input type="text" id="nodesInput" class="form-control"
+           placeholder="e.g. 192.168.1.11:5000, 192.168.1.12:5000">
+  </div>
+  <button id="addNodesBtn" class="btn btn-primary">Přidat uzly</button>
+
+  <hr>
+  <h4>Nodes:</h4>
+  <ul id="nodesList" class="list-group"></ul>
+</div>
+
+<script src="/static/vendor/jquery/jquery.min.js"></script>
+<script src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
+<script>
+async function loadNodes() {
+  try {
+    const resp = await fetch('/nodes/get');
+    if (!resp.ok) throw new Error("Fetch /nodes/get failed");
+    const data = await resp.json();
+    const nodeArray = data.total_nodes || [];
+
+    const nodesList = document.getElementById('nodesList');
+    nodesList.innerHTML = '';
+
+    if (nodeArray.length === 0) {
+      nodesList.innerHTML = "<li class='list-group-item'>Žádné uzly</li>";
+      return;
+    }
+
+    nodeArray.forEach(node => {
+      const li = document.createElement('li');
+      li.className = 'list-group-item d-flex justify-content-between align-items-center';
+
+      // A small circle to show offline/online
+      const indicator = document.createElement('span');
+      indicator.className = 'online-indicator offline';
+
+      const textSpan = document.createElement('span');
+      textSpan.textContent = node;
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'btn btn-danger btn-sm';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', () => {
+        removeNode(node);
+      });
+
+      li.appendChild(indicator);
+      li.appendChild(textSpan);
+      li.appendChild(removeBtn);
+      nodesList.appendChild(li);
+
+      checkNodeOnline(node, indicator);
+    });
+
+  } catch(e) {
+    alert("Unable to load nodes: " + e);
+  }
+}
+
+async function removeNode(node) {
+  try {
+    const r = await fetch('/nodes/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node })
+    });
+    const resp = await r.json();
+    alert(resp.message);
+    loadNodes();
+  } catch(err) {
+    alert("Error removing node: " + err);
+  }
+}
+
+function checkNodeOnline(node, indicatorElement) {
+  let url = node.trim();
+  if (!(url.startsWith("http://") || url.startsWith("https://"))) {
+    url = "http://" + url;
+  }
+  url += "/ping";
+
+  console.log("Ping =>", url);
+
+  fetch(url)
+    .then(res => {
+      console.log("ping response =>", res.status);
+      if (!res.ok) throw new Error("Ping status: " + res.status);
+      return res.json();
+    })
+    .then(json => {
+      console.log("ping json =>", json);
+      if (json.status === "OK") {
+        indicatorElement.classList.remove('offline');
+        indicatorElement.classList.add('online');
+      }
+    })
+    .catch(err => {
+      console.warn("ping error =>", err);
+    });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const addNodesBtn = document.getElementById('addNodesBtn');
+  const nodesInput  = document.getElementById('nodesInput');
+
+  addNodesBtn.addEventListener('click', () => {
+    const raw = nodesInput.value.trim();
+    if (!raw) {
+      alert("Please provide at least one IP:port");
+      return;
+    }
+    const arr = raw.split(',');
+
+    fetch('/nodes/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodes: arr })
+    })
+    .then(r => {
+      if (!r.ok) throw new Error("Node register error");
+      return r.json();
+    })
+    .then(resp => {
+      alert(resp.message);
+      nodesInput.value = '';
+      loadNodes();
+    })
+    .catch(e => {
+      alert("Error adding nodes: " + e);
+    });
+  });
+
+  loadNodes();
+});
+</script>
+</body>
+</html>

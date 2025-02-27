@@ -1,0 +1,79 @@
+<!-- client_index.html -->
+<!-- 
+  Displays a simple page where the user can generate a new wallet.
+  The wallet generation is handled by /wallet/new on the server side.
+  IP/port changes are typically on the server side in blockchain_client.py
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Blockchain Client - Wallet</title>
+  <link rel="stylesheet" href="/static/vendor/bootstrap/css/bootstrap.min.css">
+</head>
+<body class="bg-light">
+
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+  <a class="navbar-brand" href="/">Blockchain Client</a>
+  <div class="collapse navbar-collapse" id="navbarSupportedContent">
+    <ul class="navbar-nav ml-auto">
+      <li class="nav-item active">
+        <a class="nav-link" href="/">Home</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="/upload">Upload File</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="/view/transactions">View Transactions</a>
+      </li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container mt-5">
+  <h2>Vytvořit novou peněženku</h2>
+  <p>Získáte Public a Private key. Private key si bezpečně uložte!</p>
+  <button id="generateBtn" class="btn btn-primary">Vygenerovat peněženku</button>
+
+  <div id="resultArea" class="mt-4 d-none">
+    <h5>Výsledek:</h5>
+    <div class="mb-3">
+      <label>Public Key:</label>
+      <textarea id="pubKey" class="form-control" rows="4" readonly></textarea>
+    </div>
+    <div class="mb-3">
+      <label>Private Key:</label>
+      <textarea id="privKey" class="form-control" rows="6" readonly></textarea>
+    </div>
+  </div>
+</div>
+
+<script src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const generateBtn = document.getElementById('generateBtn');
+  const resultArea = document.getElementById('resultArea');
+  const pubKey = document.getElementById('pubKey');
+  const privKey = document.getElementById('privKey');
+
+  // On generate wallet => call /wallet/new => fill in the textareas
+  generateBtn.addEventListener('click', () => {
+    fetch('/wallet/new')
+      .then(r => {
+        if (!r.ok) throw new Error("Failed to generate wallet");
+        return r.json();
+      })
+      .then(resp => {
+        resultArea.classList.remove('d-none');
+        pubKey.value = resp.public_key;
+        privKey.value = resp.private_key;
+      })
+      .catch(() => {
+        alert("Unable to generate wallet.");
+      });
+  });
+});
+</script>
+</body>
+</html>
