@@ -18,7 +18,7 @@
   <div class="collapse navbar-collapse">
     <ul class="navbar-nav ml-auto">
       <li class="nav-item">
-        <a class="nav-link" href="/">Home</a>
+        <a class="nav-link" href="/">Create Account</a>
       </li>
       <li class="nav-item active">
         <a class="nav-link" href="/upload">Upload File <span class="sr-only">(current)</span></a>
@@ -31,7 +31,7 @@
 </nav>
 
 <div class="container mt-5">
-  <h2>Nahrát soubor a podepsat transakci (Client-Side signing v Pythonu)</h2>
+  <h2>Upload a file and sign a transaction</h2>
 
   <!-- The form for uploading file, specifying keys, etc. -->
   <form id="uploadForm" enctype="multipart/form-data">
@@ -66,12 +66,12 @@
     <div class="form-check">
       <input class="form-check-input" type="checkbox" id="is_sensitive" name="is_sensitive" value="1">
       <label class="form-check-label" for="is_sensitive">
-        Zašifrovat soubor (citlivé)
+        Encrypt file (sensitive)
       </label>
     </div>
     <br>
 
-    <button type="submit" class="btn btn-primary">Odeslat (podepsat)</button>
+    <button type="submit" class="btn btn-primary">Send and sign</button>
   </form>
 
   <div id="resultBox" class="alert mt-3 d-none"></div>
@@ -113,7 +113,7 @@ document.addEventListener('DOMContentLoaded', () => {
     .catch(err => {
       resultBox.classList.remove('d-none','alert-success');
       resultBox.classList.add('alert','alert-danger');
-      resultBox.textContent = "Chyba: " + err;
+      resultBox.textContent = "Error: " + err;
     });
   });
 });
