@@ -9,7 +9,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Blockchain Client - Wallet</title>
+  <title>Blockchain Client - Account</title>
   <link rel="stylesheet" href="/static/vendor/bootstrap/css/bootstrap.min.css">
 </head>
 <body class="bg-light">
@@ -19,7 +19,7 @@
   <div class="collapse navbar-collapse" id="navbarSupportedContent">
     <ul class="navbar-nav ml-auto">
       <li class="nav-item active">
-        <a class="nav-link" href="/">Home</a>
+        <a class="nav-link" href="/">Create Account <span class="sr-only">(current)</span></a>
       </li>
       <li class="nav-item">
         <a class="nav-link" href="/upload">Upload File</a>
@@ -32,12 +32,12 @@
 </nav>
 
 <div class="container mt-5">
-  <h2>Vytvořit novou peněženku</h2>
-  <p>Získáte Public a Private key. Private key si bezpečně uložte!</p>
-  <button id="generateBtn" class="btn btn-primary">Vygenerovat peněženku</button>
+  <h2>Generate New Account</h2>
+  <p>You will receive a Public and Private key. Keep the Private key safe!</p>
+  <button id="generateBtn" class="btn btn-primary">Generate account</button>
 
   <div id="resultArea" class="mt-4 d-none">
-    <h5>Výsledek:</h5>
+    <h5>Result:</h5>
     <div class="mb-3">
       <label>Public Key:</label>
       <textarea id="pubKey" class="form-control" rows="4" readonly></textarea>
@@ -61,7 +61,7 @@ document.addEventListener('DOMContentLoaded', () => {
   generateBtn.addEventListener('click', () => {
     fetch('/wallet/new')
       .then(r => {
-        if (!r.ok) throw new Error("Failed to generate wallet");
+        if (!r.ok) throw new Error("Failed to generate account");
         return r.json();
       })
       .then(resp => {
@@ -70,7 +70,7 @@ document.addEventListener('DOMContentLoaded', () => {
         privKey.value = resp.private_key;
       })
       .catch(() => {
-        alert("Unable to generate wallet.");
+        alert("Unable to generate account.");
       });
   });
 });
