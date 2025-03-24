@@ -40,7 +40,7 @@
   <div class="collapse navbar-collapse" id="navbarSupportedContent">
     <ul class="navbar-nav ml-auto">
       <li class="nav-item">
-        <a class="nav-link" href="/">Home</a>
+        <a class="nav-link" href="/">Create Account</a>
       </li>
       <li class="nav-item">
         <a class="nav-link" href="/upload">Upload File</a>
@@ -53,13 +53,13 @@
 </nav>
 
 <div class="container mt-5">
-  <h2>Seznam transakcí v celém blockchainu</h2>
+  <h2>List of transactions across the entire blockchain</h2>
 
   <div class="search-container">
-    <input id="searchInput" type="text" class="form-control" placeholder="Hledat v transakcích (alias, file, adresa...)">
-    <button id="searchBtn" class="btn btn-secondary">Hledat</button>
+    <input id="searchInput" type="text" class="form-control" placeholder="Search in transactions (alias, file, address...)">
+    <button id="searchBtn" class="btn btn-secondary">Search</button>
     <button id="loadChainBtn" class="btn btn-primary ml-2">
-      Načíst Chain z Node
+      Retrieve Chain from Node
     </button>
   </div>
 
@@ -108,7 +108,7 @@ function shortenAddress(addr) {
 function copyToClipboard(text) {
   if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text)
-      .then(() => alert("Adresa byla zkopírována do schránky."))
+      .then(() => alert("The address has been copied to the clipboard."))
       .catch(err => {
         console.warn("Clipboard error => fallback", err);
         fallbackCopyText(text);
@@ -128,9 +128,9 @@ function fallbackCopyText(text) {
     ta.select();
     document.execCommand("copy");
     document.body.removeChild(ta);
-    alert("Adresa zkopírována do schránky.");
+    alert("Address copied to clipboard.");
   } catch (e) {
-    alert("Nepodařilo se zkopírovat do schránky: " + e);
+    alert("Failed to copy to clipboard: " + e);
   }
 }
 
@@ -154,7 +154,7 @@ function renderTxRow(blockIndex, blockTimestamp, tx) {
   let fileCell = "";
   // If is_sensitive="1", do not show the file link
   if (tx.is_sensitive === "1") {
-    fileCell = `<span style="color:red;">(CITLIVÝ - skrytý)</span>`;
+    fileCell = `<span style="color:red;">(SENSITIVE - hidden)</span>`;
   } else {
     if (tx.file_name) {
       fileCell = `<span class="file-link" data-file="${tx.file_name}">${tx.file_name}</span>`;
@@ -188,7 +188,7 @@ function renderTxList(transactions) {
 async function loadChain() {
   try {
     const res = await fetch(nodeUrl + "/chain");
-    if (!res.ok) throw new Error("Chyba fetch /chain => status " + res.status);
+    if (!res.ok) throw new Error("Error fetch /chain => status " + res.status);
     const data = await res.json();
     const chain = data.chain || [];
 
@@ -209,7 +209,7 @@ async function loadChain() {
     renderTxList(allTransactions);
 
   } catch (e) {
-    alert("Nepodařilo se načíst chain: " + e);
+    alert("Failed to load chain: " + e);
   }
 }
 
