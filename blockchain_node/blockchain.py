@@ -109,7 +109,7 @@ class Blockchain:
             self.create_block(proof=100, previous_hash='1')
             self.save_data()
 
-        # Example: add "11.222.33.44:5555" to trusted nodes
+        # Example: add "11.222.33.44:5555" to trusted nodes, You can uncomment 2 lines bellow to add a node to trusted nodes.
         #self.trusted_nodes.add("11.222.33.44:5555")
         #self.save_data()
 
@@ -490,7 +490,54 @@ def get_chain():
         pruned_chain.append(blockcopy)
 
     return jsonify({"chain": pruned_chain, "length": len(pruned_chain)}),200
+@app.route('/node/upload', methods=['POST'])
+def node_upload():
+    upfile = request.files.get('file')
+    if not upfile:
+        return jsonify({"error":"Missing file"}), 400
 
+    sender          = request.form.get('sender','')
+    recipient       = request.form.get('recipient','')
+    signature       = request.form.get('signature','')
+    tx_id           = request.form.get('tx_id','')
+    alias           = request.form.get('alias','')
+    recipient_alias = request.form.get('recipient_alias','')
+    is_sensitive    = request.form.get('is_sensitive','0')
+
+    file_name = request.form.get('file_name','')
+    file_path = request.form.get('file_path','')
+    if not file_name or not file_path:
+        return jsonify({"error":"Missing file_name/path in form data"}), 400
+
+
+    enc_key_b64   = request.form.get('enc_key_b64','')
+    enc_nonce_b64 = request.form.get('enc_nonce_b64','')
+    enc_tag_b64   = request.form.get('enc_tag_b64','')
+
+    if is_sensitive == "1" and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
+        store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
+
+
+    local_abs = os.path.join(".", file_path.lstrip("./"))  
+
+    os.makedirs(os.path.dirname(local_abs), exist_ok=True)
+    upfile.save(local_abs)
+
+    idx = blockchain.add_transaction(
+        tx_id           = tx_id,
+        sender          = sender,
+        recipient       = recipient,
+        file_name       = file_name,
+        file_path       = file_path,
+        alias           = alias,
+        recipient_alias = recipient_alias,
+        signature       = signature,
+        is_sensitive    = is_sensitive
+    )
+    if not idx:
+        return jsonify({"error":"Invalid signature"}), 400
+
+    return jsonify({"message":f"File received, block = {idx}"}), 201
 @app.route('/transactions/new', methods=['POST'])
 def new_transaction():
     data = request.get_json() or {}
