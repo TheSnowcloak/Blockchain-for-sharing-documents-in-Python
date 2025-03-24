@@ -44,7 +44,7 @@
     <ul class="navbar-nav ml-auto">
       <!-- Link to home  -->
       <li class="nav-item">
-        <a class="nav-link" href="/">Home</a>
+        <a class="nav-link" href="/">Node Dashboard</a>
       </li>
 
       <!-- Link to configure page (current) -->
@@ -56,8 +56,8 @@
 </nav>
 
 <div class="container mt-5">
-  <h2>Konfigurace uzlů</h2>
-  <p>Přidávat / odebírat nody, check, jestli jsou online (/ping)</p>
+  <h2>Node configuration</h2>
+  <p>Add/remove nodes, check if they are online (/ping)</p>
 
   <!-- Adding new nodes -->
   <div class="form-group">
@@ -65,7 +65,7 @@
     <input type="text" id="nodesInput" class="form-control"
            placeholder="e.g. 192.168.1.11:5000, 192.168.1.12:5000">
   </div>
-  <button id="addNodesBtn" class="btn btn-primary">Přidat uzly</button>
+  <button id="addNodesBtn" class="btn btn-primary">Add nodes</button>
 
   <hr>
   <h4>Nodes:</h4>
@@ -86,7 +86,7 @@ async function loadNodes() {
     nodesList.innerHTML = '';
 
     if (nodeArray.length === 0) {
-      nodesList.innerHTML = "<li class='list-group-item'>Žádné uzly</li>";
+      nodesList.innerHTML = "<li class='list-group-item'>No nodes</li>";
       return;
     }
 
