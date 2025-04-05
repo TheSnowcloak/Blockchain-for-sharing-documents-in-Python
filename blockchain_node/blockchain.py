@@ -244,7 +244,7 @@ class Blockchain:
         replaced = False
         length_here = len(self.chain)
         new_chain = None
-
+    
         # 1) Check trusted nodes
         for netloc in self.trusted_nodes:
             try:
@@ -259,24 +259,26 @@ class Blockchain:
                         new_chain   = chain_data
             except requests.exceptions.RequestException:
                 pass
-
+    
         # 2) Then check untrusted if no better chain found
         if not new_chain:
-            untrusted = self.nodes - self.trusted_nodes
-            for netloc in untrusted:
-                try:
-                    url = f"http://{netloc}/chain"
-                    r   = requests.get(url, timeout=4)
-                    if r.status_code == 200:
-                        data = r.json()
-                        chain_len  = data['length']
-                        chain_data = data['chain']
-                        if chain_len > length_here and self.valid_chain(chain_data):
-                            length_here = chain_len
-                            new_chain   = chain_data
-                except requests.exceptions.RequestException:
-                    pass
-
+            # Only proceed with untrusted nodes if we have no trusted nodes at all
+            if len(self.trusted_nodes) == 0:
+                untrusted = self.nodes - self.trusted_nodes
+                for netloc in untrusted:
+                    try:
+                        url = f"http://{netloc}/chain"
+                        r   = requests.get(url, timeout=4)
+                        if r.status_code == 200:
+                            data = r.json()
+                            chain_len  = data['length']
+                            chain_data = data['chain']
+                            if chain_len > length_here and self.valid_chain(chain_data):
+                                length_here = chain_len
+                                new_chain   = chain_data
+                    except requests.exceptions.RequestException:
+                        pass
+    
         # If found a new chain, adopt it and sync files
         if new_chain:
             self.chain = new_chain
@@ -284,7 +286,7 @@ class Blockchain:
             self.save_data()
             replaced = True
         return replaced
-
+    
     def sync_files(self):
         """
         For each node (trusted or not), retrieve /chain. For each transaction:
