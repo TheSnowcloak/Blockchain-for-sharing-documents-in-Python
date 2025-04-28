@@ -1,7 +1,7 @@
 # blockchain.py
-#
+# 
 # Main Python Flask application that implements the Node (server side) for the blockchain.
-#
+# 
 # Key highlights:
 #  - Stores blocks, transactions, handles consensus, file uploads, etc.
 #  - Has "trusted_nodes" vs "nodes" sets to filter out sensitive data from untrusted nodes.
@@ -109,8 +109,8 @@ class Blockchain:
             self.create_block(proof=100, previous_hash='1')
             self.save_data()
 
-        # Example: add "127.0.0.1:5000" to trusted nodes, You can uncomment 2 lines bellow to add a node to trusted nodes.
-        #self.trusted_nodes.add("127.0.0.1:5000")
+        # Example: add "11.222.33.44:5555" to trusted nodes, You can uncomment 2 lines bellow to add a node to trusted nodes.
+        #self.trusted_nodes.add("11.222.33.44:5555")
         #self.save_data()
 
     def transaction_exists(self, tx_id):
@@ -235,55 +235,18 @@ class Blockchain:
             idx += 1
         return True
 
-    # New helper to check if another chain is a "strict superset" of our current chain
-    def is_strict_superset(self, my_chain, their_chain):
+    def resolve_conflicts(self):
         """
-        This function checks if 'their_chain' is at least 1 block longer 
-        and if the entire 'my_chain' matches the beginning of 'their_chain'.
-        That means 'their_chain' is simply an extension of 'my_chain', 
-        not a completely different or forked history.
+        Consensus mechanism: tries to fetch chain from trusted_nodes first,
+        if no longer chain found, tries untrusted nodes.
+        If a longer valid chain is found, we adopt it, then call sync_files.
         """
-        if len(their_chain) <= len(my_chain):
-            return False
-        # Compare each block 1..N in my_chain with the first N blocks of their_chain
-        for i in range(len(my_chain)):
-            if my_chain[i] != their_chain[i]:
-                return False
-        return True
+        replaced = False
+        length_here = len(self.chain)
+        new_chain = None
 
-def resolve_conflicts(self):
-    """
-    1) Tries to fetch chain from trusted_nodes first.
-    2) If no better chain found, tries untrusted nodes as well,
-       but only if the new chain is a strict superset 
-       (i.e. does not rewrite any existing blocks).
-    """
-    replaced = False
-    length_here = len(self.chain)
-    new_chain = None
-
-    # 1) Check trusted nodes
-    for netloc in self.trusted_nodes:
-        try:
-            url = f"http://{netloc}/chain"
-            r   = requests.get(url, timeout=4)
-            if r.status_code == 200:
-                data = r.json()
-                chain_len  = data['length']
-                chain_data = data['chain']
-                if chain_len > length_here and self.valid_chain(chain_data):
-                    length_here = chain_len
-                    new_chain   = chain_data
-        except requests.exceptions.RequestException:
-            pass
-
-    # 2) Then check untrusted if no better chain found from trusted
-    #    but remove (or comment out) the condition about len(self.trusted_nodes) == 0
-    if not new_chain:
-        # Always check untrusted, in case they have a strictly longer chain 
-        # that just extends the current chain (i.e. not rewriting).
-        untrusted = self.nodes - self.trusted_nodes
-        for netloc in untrusted:
+        # 1) Check trusted nodes
+        for netloc in self.trusted_nodes:
             try:
                 url = f"http://{netloc}/chain"
                 r   = requests.get(url, timeout=4)
@@ -291,51 +254,36 @@ def resolve_conflicts(self):
                     data = r.json()
                     chain_len  = data['length']
                     chain_data = data['chain']
-                    # Only accept if it's strictly a superset of our existing chain
-                    if (chain_len > length_here 
-                        and self.valid_chain(chain_data)
-                        and self.is_strict_superset(self.chain, chain_data)):
+                    if chain_len > length_here and self.valid_chain(chain_data):
                         length_here = chain_len
                         new_chain   = chain_data
             except requests.exceptions.RequestException:
                 pass
 
-    if new_chain:
-        logging.info("Chain replaced. Adopting new chain from superset logic.")
-        self.chain = new_chain
-        self.sync_files()
-        self.save_data()
-        self.cleanup_unlisted_files() 
-        replaced = True
-    return replaced
+        # 2) Then check untrusted if no better chain found
+        if not new_chain:
+            untrusted = self.nodes - self.trusted_nodes
+            for netloc in untrusted:
+                try:
+                    url = f"http://{netloc}/chain"
+                    r   = requests.get(url, timeout=4)
+                    if r.status_code == 200:
+                        data = r.json()
+                        chain_len  = data['length']
+                        chain_data = data['chain']
+                        if chain_len > length_here and self.valid_chain(chain_data):
+                            length_here = chain_len
+                            new_chain   = chain_data
+                except requests.exceptions.RequestException:
+                    pass
 
-    # Function to remove files that are no longer in the chain
-    def cleanup_unlisted_files(self):
-        """
-        This method removes any file from ./uploads that doesn't appear 
-        in the current chain. We call it after adopting a new chain, so 
-        that orphaned or invalid files are deleted.
-        """
-        valid_paths = set()
-        # Gather all file_path from the current chain
-        for block in self.chain:
-            for tx in block["transactions"]:
-                fp = tx.get("file_path", "")
-                if fp.startswith("./uploads/"):
-                    valid_paths.add(fp)
-
-        uploads_dir = "./uploads"
-        if os.path.exists(uploads_dir) and os.path.isdir(uploads_dir):
-            for f in os.listdir(uploads_dir):
-                full_path = os.path.join(uploads_dir, f)
-                rel_path = f"./uploads/{f}"
-                # If it's a file and not in valid_paths, remove it
-                if os.path.isfile(full_path) and rel_path not in valid_paths:
-                    logging.info(f"Removing orphaned file => {rel_path}")
-                    try:
-                        os.remove(full_path)
-                    except OSError as e:
-                        logging.warning(f"Could not remove {full_path}: {e}")
+        # If found a new chain, adopt it and sync files
+        if new_chain:
+            self.chain = new_chain
+            self.sync_files()
+            self.save_data()
+            replaced = True
+        return replaced
 
     def sync_files(self):
         """
@@ -542,7 +490,6 @@ def get_chain():
         pruned_chain.append(blockcopy)
 
     return jsonify({"chain": pruned_chain, "length": len(pruned_chain)}),200
-
 @app.route('/node/upload', methods=['POST'])
 def node_upload():
     upfile = request.files.get('file')
@@ -562,6 +509,7 @@ def node_upload():
     if not file_name or not file_path:
         return jsonify({"error":"Missing file_name/path in form data"}), 400
 
+
     enc_key_b64   = request.form.get('enc_key_b64','')
     enc_nonce_b64 = request.form.get('enc_nonce_b64','')
     enc_tag_b64   = request.form.get('enc_tag_b64','')
@@ -569,7 +517,8 @@ def node_upload():
     if is_sensitive == "1" and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
         store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
 
-    local_abs = os.path.join(".", file_path.lstrip("./"))
+
+    local_abs = os.path.join(".", file_path.lstrip("./"))  
 
     os.makedirs(os.path.dirname(local_abs), exist_ok=True)
     upfile.save(local_abs)
@@ -589,7 +538,6 @@ def node_upload():
         return jsonify({"error":"Invalid signature"}), 400
 
     return jsonify({"message":f"File received, block = {idx}"}), 201
-
 @app.route('/transactions/new', methods=['POST'])
 def new_transaction():
     data = request.get_json() or {}
