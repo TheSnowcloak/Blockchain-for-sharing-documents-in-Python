@@ -138,6 +138,9 @@ class Blockchain:
         else:
             self.create_block(proof=100, previous_hash="1")
             self.save_data()
+        # Example: add "11.222.33.44:5555" to trusted nodes, You can uncomment 2 lines bellow to add a node to trusted nodes.
+         #self.trusted_nodes.add("11.222.33.44:5555")
+         #self.save_data()
 
     # ----------------------------------------------------------------
     # --- MOD: helper to decide whether *this* node is allowed to mine
