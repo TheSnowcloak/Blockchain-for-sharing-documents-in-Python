@@ -1,6 +1,6 @@
 # README
 
-## Project Overview
+## This project was created as part of a diploma thesis on the topic: USABILITY OF BLOCKCHAIN TECHNOLOGY IN INDUSTRY
 
 This repository provides a simple demonstration of a blockchain-based file sharing and transaction system. It consists of two main components:
 
