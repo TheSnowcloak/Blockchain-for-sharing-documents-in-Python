@@ -45,9 +45,10 @@ The aim is to showcase:
 
 ## Important Steps / Notes
 
-1. **Modifying IP/Port for the Client**  
+1. **Modifying IP/Port for the Client**   
    - In `blockchain_client.py`, the variable `NODE_URL` must be set to the address of your blockchain node (e.g., `http://192.168.1.10:5000` or `http://YOUR_PUBLIC_IP:5000`).
-
+   - In `view_transactions.html` you will need to also find a line with `const nodeUrl = "http://127.0.0.1:5000/";`.
+   In this line, you can edit the node's IP address to which it will connect.
 2. **Starting the Node (server)**  
    - Run `python blockchain.py` (or `python3 blockchain.py` depending on your environment).
    - By default, it listens on `http://0.0.0.0:5000`.
