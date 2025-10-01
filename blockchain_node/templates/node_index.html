@@ -122,9 +122,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // Manual mine
   function mineBlock() {
     fetch('/mine')
-      .then(r => {
-        if (!r.ok) throw new Error("Error in mine");
-        return r.json();
+      .then(async response => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const message = payload.message || 'Error mining block.';
+          throw new Error(message);
+        }
+        return payload;
       })
       .then(resp => {
         mineResult.classList.remove('d-none','alert-danger');
@@ -135,7 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
       .catch(e => {
         mineResult.classList.remove('d-none','alert-success');
         mineResult.classList.add('alert','alert-danger');
-        mineResult.textContent = "Error mining block.";
+        mineResult.textContent = e.message || 'Error mining block.';
       });
   }
 
