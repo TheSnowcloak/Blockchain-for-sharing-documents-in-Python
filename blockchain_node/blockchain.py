@@ -656,7 +656,9 @@ class Blockchain:
         with self._lock:
             trusted_snapshot = set(self.trusted_nodes)
             all_nodes = list(self.nodes.union(self.trusted_nodes))
+            local_netloc = normalize_netloc(self.validator_netloc) if self.validator_netloc else None
         for netloc in all_nodes:
+            normalized_source = normalize_netloc(netloc)
             chain_data = self._fetch_chain_with_retry(netloc)
             if not chain_data:
                 continue
@@ -673,10 +675,31 @@ class Blockchain:
                         self._clear_deferred_retry(key)
                         continue
                     success = self._download_file_with_retry(netloc, tx, local_abs)
+                    owner_netloc = tx.get("file_owner")
+                    attempted_owner = False
+                    owner_key = None
+                    if not success and owner_netloc:
+                        owner_netloc = normalize_netloc(owner_netloc)
+                        if owner_netloc != normalized_source and owner_netloc != local_netloc:
+                            attempted_owner = True
+                            owner_key = (owner_netloc, file_path)
+                            success = self._download_file_with_retry(
+                                owner_netloc,
+                                tx,
+                                local_abs,
+                                attempt_offset=self.sync_max_retries,
+                            )
+                            if success:
+                                self._clear_deferred_retry(owner_key)
                     if success:
                         self._clear_deferred_retry(key)
+                        if attempted_owner and owner_key:
+                            self._clear_deferred_retry(owner_key)
                     else:
-                        self._schedule_deferred_retry(netloc, tx, attempt=1)
+                        if attempted_owner and owner_key:
+                            self._schedule_deferred_retry(owner_netloc, tx, attempt=1)
+                        else:
+                            self._schedule_deferred_retry(netloc, tx, attempt=1)
 
     def broadcast_new_transaction(self, tx_dict):
         with self._lock:
