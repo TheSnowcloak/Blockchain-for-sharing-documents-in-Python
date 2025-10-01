@@ -1,6 +1,7 @@
 import hashlib
 import os
 import unittest
+from unittest import mock
 import uuid
 from io import BytesIO
 
@@ -12,6 +13,11 @@ class UploadSecurityTestCase(unittest.TestCase):
         self.client = node_module.app.test_client()
         node_module.blockchain.transactions = []
         self._created_paths = []
+        self._keys_db_backup = None
+        if os.path.exists(node_module.KEYS_DB_FILE):
+            with open(node_module.KEYS_DB_FILE, 'r', encoding='utf-8') as fh:
+                self._keys_db_backup = fh.read()
+            os.remove(node_module.KEYS_DB_FILE)
 
     def tearDown(self):
         for path in self._created_paths:
@@ -20,6 +26,11 @@ class UploadSecurityTestCase(unittest.TestCase):
             except FileNotFoundError:
                 pass
         node_module.blockchain.transactions = []
+        if os.path.exists(node_module.KEYS_DB_FILE):
+            os.remove(node_module.KEYS_DB_FILE)
+        if self._keys_db_backup is not None:
+            with open(node_module.KEYS_DB_FILE, 'w', encoding='utf-8') as fh:
+                fh.write(self._keys_db_backup)
 
     def test_malicious_filename_rejected_and_node_file_intact(self):
         target_file = os.path.join('blockchain_node', 'blockchain.py')
@@ -86,6 +97,42 @@ class UploadSecurityTestCase(unittest.TestCase):
         saved_abs = os.path.abspath(os.path.join('.', tx['file_path'].lstrip('./')))
         self._created_paths.append(saved_abs)
         self.assertTrue(os.path.exists(saved_abs))
+
+    def test_invalid_signature_upload_cleans_pending_and_keys(self):
+        dummy_uuid_hex = 'feedfacefeedfacefeedfacefeedface'
+        expected_filename = 'document.txt'
+        expected_pending_name = f"{dummy_uuid_hex}_{expected_filename}"
+        expected_pending_path = os.path.abspath(
+            os.path.join(node_module.PENDING_FOLDER, expected_pending_name)
+        )
+
+        data = {
+            'sender': 'not-miner',
+            'recipient': 'recipient',
+            'signature': '',
+            'tx_id': uuid.uuid4().hex,
+            'alias': '',
+            'recipient_alias': '',
+            'is_sensitive': '1',
+            'file_name': expected_filename,
+            'file_path': './pending_uploads/ignored.txt',
+            'enc_key_b64': 'Zm9v',
+            'enc_nonce_b64': 'YmFy',
+            'enc_tag_b64': 'YmF6',
+        }
+
+        dummy_uuid = type('DummyUUID', (), {'hex': dummy_uuid_hex})()
+
+        with mock.patch.object(node_module, 'uuid4', return_value=dummy_uuid):
+            response = self.client.post(
+                '/node/upload',
+                data={**data, 'file': (BytesIO(b'content'), expected_filename)},
+                content_type='multipart/form-data',
+            )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertFalse(os.path.exists(expected_pending_path))
+        self.assertFalse(os.path.exists(node_module.KEYS_DB_FILE))
 
 
 if __name__ == '__main__':

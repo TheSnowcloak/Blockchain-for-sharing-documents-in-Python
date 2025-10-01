@@ -116,6 +116,16 @@ def store_encryption_keys(tx_id, key_b64, nonce_b64, tag_b64):
     }
     save_keys_db(db)
 
+
+def delete_encryption_keys(tx_id):
+    db = load_keys_db()
+    if tx_id in db:
+        del db[tx_id]
+        save_keys_db(db)
+        return True
+    return False
+
+
 def get_encryption_keys(tx_id):
     db = load_keys_db()
     return db.get(tx_id)
@@ -980,8 +990,12 @@ def node_upload():
     enc_key_b64 = request.form.get('enc_key_b64', '')
     enc_nonce_b64 = request.form.get('enc_nonce_b64', '')
     enc_tag_b64 = request.form.get('enc_tag_b64', '')
-    if is_sensitive == '1' and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
-        store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
+    has_encryption_payload = (
+        is_sensitive == '1'
+        and enc_key_b64
+        and enc_nonce_b64
+        and enc_tag_b64
+    )
 
     file_owner = normalize_netloc(request.host)
 
@@ -1000,7 +1014,28 @@ def node_upload():
         )
 
     if not idx:
+        try:
+            os.remove(pending_abs)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logging.warning(
+                "Failed to remove pending upload for rejected tx %s: %s",
+                tx_id,
+                exc,
+            )
+        try:
+            delete_encryption_keys(tx_id)
+        except Exception as exc:
+            logging.warning(
+                "Failed to remove encryption metadata for rejected tx %s: %s",
+                tx_id,
+                exc,
+            )
         return jsonify({"error": "Invalid signature"}), 400
+
+    if has_encryption_payload:
+        store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
 
     return jsonify({"message": f"File received, block = {idx}"}), 201
 
@@ -1248,14 +1283,6 @@ def auto_sync_conflicts(interval=10):
             logging.info("Chain replaced.")
         else:
             logging.info("Chain is authoritative.")
-
-@app.route('/trusted_nodes/get', methods=['GET'])
-def get_trusted_nodes():
-    with blockchain.lock:
-        trusted_snapshot = list(blockchain.trusted_nodes)
-    return jsonify({
-        "trusted_nodes": trusted_snapshot
-    }),200
 
 @app.route('/sync/failures', methods=['GET'])
 def sync_failures():
