@@ -46,6 +46,24 @@ os.makedirs(UPLOAD_FOLDER,  exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'txt','pdf','png','jpg','jpeg','gif','docx'}
 
+def _ensure_safe_filename(name: str) -> str:
+    safe_name = secure_filename(name)
+    if not safe_name or safe_name != name:
+        raise ValueError("Invalid filename")
+    return safe_name
+
+def _is_safe_subpath(path_value: str, base_directory: str) -> bool:
+    if not path_value:
+        return False
+    if os.path.isabs(path_value):
+        return False
+    normalized = os.path.normpath(path_value)
+    if normalized.startswith('..'):
+        return False
+    abs_base = os.path.abspath(base_directory)
+    abs_target = os.path.abspath(os.path.join('.', normalized.lstrip('./')))
+    return abs_target.startswith(os.path.join(abs_base, ''))
+
 ###################################
 # Utility to unify IP:port format
 ###################################
@@ -151,6 +169,21 @@ class Blockchain:
         self.save_data()
         return block
 
+    def _build_signable_transaction(self, transaction_dict):
+        """Return an OrderedDict containing only the fields that are signed."""
+        from collections import OrderedDict
+
+        signable_fields = (
+            "tx_id",
+            "sender",
+            "recipient",
+            "file_name",
+            "alias",
+            "recipient_alias",
+            "is_sensitive",
+        )
+        return OrderedDict((field, transaction_dict.get(field, "")) for field in signable_fields)
+
     def add_transaction(self,
                         tx_id,
                         sender,
@@ -181,7 +214,8 @@ class Blockchain:
 
         # If not a mining reward, verify signature
         if sender != MINING_SENDER:
-            if not self.verify_signature(sender, signature, tr):
+            signable = self._build_signable_transaction(tr)
+            if not self.verify_signature(sender, signature, signable):
                 logging.error("Signature invalid!")
                 return False
 
@@ -508,9 +542,25 @@ def node_upload():
     is_sensitive    = request.form.get('is_sensitive','0')
 
     file_name = request.form.get('file_name','')
-    file_path = request.form.get('file_path','')
-    if not file_name or not file_path:
-        return jsonify({"error":"Missing file_name/path in form data"}), 400
+    if not file_name:
+        return jsonify({"error":"Missing file_name in form data"}), 400
+
+    provided_path = request.form.get('file_path', '')
+    if provided_path and not _is_safe_subpath(provided_path, PENDING_FOLDER):
+        return jsonify({"error": "Invalid file_path supplied"}), 400
+
+    try:
+        safe_file_name = _ensure_safe_filename(file_name)
+    except ValueError:
+        return jsonify({"error": "Invalid file_name supplied"}), 400
+
+    pending_filename = f"{uuid4().hex}_{safe_file_name}"
+    pending_rel = os.path.join(PENDING_FOLDER, pending_filename)
+    pending_abs = os.path.abspath(pending_rel)
+    pending_root = os.path.abspath(PENDING_FOLDER)
+
+    if not pending_abs.startswith(os.path.join(pending_root, '')):
+        return jsonify({"error": "Failed to derive safe pending path"}), 400
 
 
     enc_key_b64   = request.form.get('enc_key_b64','')
@@ -520,18 +570,17 @@ def node_upload():
     if is_sensitive == "1" and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
         store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
 
+    os.makedirs(os.path.dirname(pending_abs), exist_ok=True)
+    upfile.save(pending_abs)
 
-    local_abs = os.path.join(".", file_path.lstrip("./"))  
-
-    os.makedirs(os.path.dirname(local_abs), exist_ok=True)
-    upfile.save(local_abs)
+    canonical_file_path = os.path.join(PENDING_FOLDER, pending_filename)
 
     idx = blockchain.add_transaction(
         tx_id           = tx_id,
         sender          = sender,
         recipient       = recipient,
-        file_name       = file_name,
-        file_path       = file_path,
+        file_name       = safe_file_name,
+        file_path       = canonical_file_path,
         alias           = alias,
         recipient_alias = recipient_alias,
         signature       = signature,
@@ -552,6 +601,15 @@ def new_transaction():
     needed = ["tx_id","sender","recipient","file_name","file_path","signature"]
     if not all(k in data for k in needed):
         return "Missing values",400
+
+    try:
+        data['file_name'] = _ensure_safe_filename(data['file_name'])
+    except ValueError:
+        return "Invalid file_name", 400
+
+    file_path_value = data['file_path']
+    if not (_is_safe_subpath(file_path_value, PENDING_FOLDER) or _is_safe_subpath(file_path_value, UPLOAD_FOLDER)):
+        return "Invalid file_path", 400
 
     idx = blockchain.add_transaction(
         tx_id           = data["tx_id"],
