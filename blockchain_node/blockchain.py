@@ -116,6 +116,18 @@ def get_encryption_keys(tx_id):
 ###################################
 class Blockchain:
     def __init__(self):
+        self._lock = threading.RLock()
+        self.transactions = []
+        self.chain = []
+        self.nodes = set()           # "ip:port" for untrusted
+        self.trusted_nodes = set()   # "ip:port" for trusted
+
+        if os.path.exists(DATA_FILE):
+            self.load_data()
+            if len(self.chain) == 0:
+                self.create_block(proof=100, previous_hash='1')
+class Blockchain:
+    def __init__(self):
         self.transactions = []
         self.chain = []
         self.nodes = set()           # "ip:port" for untrusted
@@ -143,6 +155,46 @@ class Blockchain:
         #self.trusted_nodes.add("127.0.0.1:5000")
         #self.save_data()
 
+    @property
+    def lock(self):
+        return self._lock
+
+    def transaction_exists(self, tx_id):
+        with self._lock:
+            for t in self.transactions:
+                if t.get("tx_id") == tx_id:
+                    return True
+            for block in self.chain:
+                for t in block["transactions"]:
+                    if t.get("tx_id") == tx_id:
+                        return True
+        return False
+
+    def create_block(self, proof, previous_hash):
+        with self._lock:
+            # Move files from pending_uploads to uploads upon block creation
+            for tx in self.transactions:
+                fp = tx.get("file_path")
+                if fp and fp.startswith("./pending_uploads/"):
+                    old_abs = os.path.join(".", fp)
+                    if os.path.exists(old_abs):
+                        new_path = fp.replace("pending_uploads", "uploads", 1)
+                        new_abs  = os.path.join(".", new_path)
+                        os.makedirs(os.path.dirname(new_abs), exist_ok=True)
+                        os.rename(old_abs, new_abs)
+                        tx["file_path"] = new_path
+
+            block = {
+                "index":        len(self.chain) + 1,
+                "timestamp":    str(datetime.datetime.now()),
+                "transactions": self.transactions,
+                "proof":        proof,
+                "previous_hash": previous_hash
+            }
+            self.chain.append(block)
+            self.transactions = []
+            self.save_data()
+            return block
     def transaction_exists(self, tx_id):
         for t in self.transactions:
             if t.get("tx_id") == tx_id:
@@ -239,6 +291,41 @@ class Blockchain:
                         is_sensitive="0",
                         file_owner=None):
                         is_sensitive="0"):
+        with self._lock:
+            # Ignore if transaction already in chain
+            if self.transaction_exists(tx_id):
+                logging.info(f"Transaction {tx_id} already known. Duplicate ignored.")
+                return self.last_block['index']
+
+            # Build transaction dictionary
+            from collections import OrderedDict
+            tr = OrderedDict({
+                "tx_id":           tx_id,
+                "sender":          sender,
+                "recipient":       recipient,
+                "file_name":       file_name,
+                "file_path":       file_path,
+                "alias":           alias,
+                "recipient_alias": recipient_alias,
+                "is_sensitive":    is_sensitive
+            })
+
+            # If not a mining reward, verify signature
+            if sender != MINING_SENDER:
+                if not self.verify_signature(sender, signature, tr):
+                    logging.error("Signature invalid!")
+                    return False
+
+            self.transactions.append(tr)
+
+            # Auto-mine if transaction queue >= 5
+            if len(self.transactions) >= 5:
+                logging.info("Reached 5 pending TX. Auto-mining new block.")
+                last_block = self.last_block
+                prev_hash  = self.hash(last_block)
+                self.create_block(proof=100, previous_hash=prev_hash)
+
+            return self.last_block['index']
         # Ignore if transaction already in chain
         if self.transaction_exists(tx_id):
             logging.info(f"Transaction {tx_id} already known. Duplicate ignored.")
@@ -311,7 +398,8 @@ class Blockchain:
 
     @property
     def last_block(self):
-        return self.chain[-1]
+        with self._lock:
+            return self.chain[-1]
 
     @staticmethod
     def hash(block):
@@ -508,11 +596,14 @@ class Blockchain:
         If a longer valid chain is found, we adopt it, then call sync_files.
         """
         replaced = False
-        length_here = len(self.chain)
+        with self._lock:
+            length_here = len(self.chain)
+            trusted_nodes = list(self.trusted_nodes)
+            untrusted_nodes = list(self.nodes - self.trusted_nodes)
         new_chain = None
 
         # 1) Check trusted nodes
-        for netloc in self.trusted_nodes:
+        for netloc in trusted_nodes:
             try:
                 url = f"http://{netloc}/chain"
                 r   = requests.get(url, timeout=4)
@@ -528,8 +619,7 @@ class Blockchain:
 
         # 2) Then check untrusted if no better chain found
         if not new_chain:
-            untrusted = self.nodes - self.trusted_nodes
-            for netloc in untrusted:
+            for netloc in untrusted_nodes:
                 try:
                     url = f"http://{netloc}/chain"
                     r   = requests.get(url, timeout=4)
@@ -540,6 +630,32 @@ class Blockchain:
                         if chain_len > length_here and self.valid_chain(chain_data):
                             length_here = chain_len
                             new_chain   = chain_data
+                except requests.exceptions.RequestException:
+                    pass
+
+        # If found a new chain, adopt it and sync files
+        if new_chain:
+            with self._lock:
+                self.chain = new_chain
+                self.save_data()
+                replaced = True
+            self.sync_files()
+        return replaced
+
+    def sync_files(self):
+        """
+        For each node (trusted or not), retrieve /chain. For each transaction:
+        if is_sensitive=1 and the node is not in self.trusted_nodes => skip.
+        Otherwise, try to download the file from /file/<filename>.
+        """
+        with self._lock:
+            trusted_snapshot = set(self.trusted_nodes)
+            all_netlocs = list(self.nodes.union(self.trusted_nodes))
+        for netloc in all_netlocs:
+            try:
+                url = f"http://{netloc}/chain"
+                r   = requests.get(url, timeout=4)
+                if r.status_code == 200:
                 except requests.exceptions.RequestException:
                     pass
 
@@ -567,13 +683,42 @@ class Blockchain:
                     cdata = r.json().get('chain', [])
                     for block in cdata:
                         for tx in block['transactions']:
-                            if tx.get("is_sensitive","0") == "1" and netloc not in self.trusted_nodes:
+                            if tx.get("is_sensitive","0") == "1" and netloc not in trusted_snapshot:
                                 continue
                             fp = tx.get("file_path", "")
                             if fp and fp.startswith("./uploads/"):
                                 local_abs = os.path.join(".", fp)
                                 if not os.path.exists(local_abs):
                                     fn = tx["file_name"]
+                                    downurl = f"http://{netloc}/file/{fn}"
+                                    try:
+                                        fresp = requests.get(downurl, stream=True, timeout=4)
+                                        if fresp.status_code == 200:
+                                            os.makedirs(os.path.dirname(local_abs), exist_ok=True)
+                                            with open(local_abs, 'wb') as f:
+                                                for chunk in fresp.iter_content(4096):
+                                                    f.write(chunk)
+                                    except requests.exceptions.RequestException:
+                                        pass
+            except requests.exceptions.RequestException:
+                pass
+
+    def broadcast_new_transaction(self, tx_dict):
+        """
+        If transaction is sensitive => only broadcast to trusted_nodes,
+        else broadcast to everyone.
+        """
+        with self._lock:
+            if tx_dict.get("is_sensitive","0") == "1":
+                targets = list(self.trusted_nodes)
+                logging.info("Broadcast CITLIVÉ => only to trusted nodes.")
+            else:
+                targets = list(self.nodes.union(self.trusted_nodes))
+
+        for netloc in targets:
+            try:
+                url = f"http://{netloc}/transactions/new"
+                data = dict(tx_dict)
                                     candidates = []
 
                                     def add_candidate(host):
@@ -704,6 +849,61 @@ class Blockchain:
                 logging.warning(f"Broadcast to {netloc} failed: {e}")
 
     def save_data(self):
+        with self._lock:
+            data = {
+                "chain":         self.chain,
+                "nodes":         list(self.nodes),
+                "trusted_nodes": list(self.trusted_nodes),
+                "transactions":  self.transactions
+            }
+            with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            logging.info("Blockchain data saved.")
+
+    def load_data(self):
+        """
+        Loads chain, nodes, and transactions from DATA_FILE.
+        Normalizes netloc for both self.nodes and self.trusted_nodes.
+        """
+        with self._lock:
+            if os.path.exists(DATA_FILE):
+                with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                    d = json.load(f)
+                new_nodes = set()
+                for item in d.get("nodes", []):
+                    new_nodes.add(normalize_netloc(item))
+                new_trusted = set()
+                for item in d.get("trusted_nodes", []):
+                    new_trusted.add(normalize_netloc(item))
+
+                self.chain         = d.get("chain", [])
+                self.nodes         = new_nodes
+                self.trusted_nodes = new_trusted
+                self.transactions  = d.get("transactions", [])
+            else:
+                self.chain = []
+                self.nodes = set()
+                self.trusted_nodes = set()
+                self.transactions = []
+
+    def add_node(self, address):
+        """
+        Called by /nodes/register endpoint. Takes an address, normalizes it,
+        and adds it to self.nodes.
+        """
+        with self._lock:
+            address = normalize_netloc(address)
+            self.nodes.add(address)
+            self.save_data()
+
+    def remove_node(self, address):
+        with self._lock:
+            address = normalize_netloc(address)
+            if address in self.nodes:
+                self.nodes.remove(address)
+                self.save_data()
+                return True
+        return False
         data = {
             "chain":         self.chain,
             "nodes":         list(self.nodes),
@@ -765,16 +965,18 @@ class Blockchain:
         Called by /trusted_nodes/register endpoint. Takes an address, normalizes it,
         and adds it to self.trusted_nodes.
         """
-        address = normalize_netloc(address)
-        self.trusted_nodes.add(address)
-        self.save_data()
+        with self._lock:
+            address = normalize_netloc(address)
+            self.trusted_nodes.add(address)
+            self.save_data()
 
     def remove_trusted_node(self, address):
-        address = normalize_netloc(address)
-        if address in self.trusted_nodes:
-            self.trusted_nodes.remove(address)
-            self.save_data()
-            return True
+        with self._lock:
+            address = normalize_netloc(address)
+            if address in self.trusted_nodes:
+                self.trusted_nodes.remove(address)
+                self.save_data()
+                return True
         return False
 
 # Create the global Blockchain instance
@@ -810,6 +1012,31 @@ def configure():
     """
     return render_template('configure.html')
 
+@app.route('/mine', methods=['GET'])
+def mine():
+    """
+    Example method to auto-mine a new block with a mining reward.
+    """
+    with blockchain.lock:
+        last_block = blockchain.last_block
+        proof = 100
+        blockchain.add_transaction(
+            tx_id=str(uuid4().hex),
+            sender=MINING_SENDER,
+            recipient=node_identifier,
+            file_name=None,
+            file_path=None,
+            alias="Manually mined block",
+            recipient_alias="",
+            signature=""
+        )
+        prev_hash = blockchain.hash(last_block)
+        block = blockchain.create_block(proof, prev_hash)
+    return jsonify({
+        "message":"New block forged",
+        "index": block["index"],
+        "transactions": block["transactions"],
+        "proof": block["proof"],
 @app.route('/validator/configure', methods=['GET', 'POST'])
 def configure_validator():
     if request.method == 'GET':
@@ -879,26 +1106,21 @@ def get_chain():
     otherwise prunes out is_sensitive=1 transactions.
     """
     caller_ip = request.remote_addr
-    is_trusted = False
-    for netloc in blockchain.trusted_nodes:
-        base_ip = netloc.split(":")[0]
-        if base_ip == caller_ip:
-            is_trusted = True
-            break
-
     import copy
+    with blockchain.lock:
+        trusted_snapshot = list(blockchain.trusted_nodes)
+        chain_snapshot = copy.deepcopy(blockchain.chain)
+
+    is_trusted = any(netloc.split(":")[0] == caller_ip for netloc in trusted_snapshot)
+
     pruned_chain = []
-    for block in blockchain.chain:
-        blockcopy = copy.deepcopy(block)
+    for block in chain_snapshot:
         if not is_trusted:
-            new_txs = []
-            for tx in blockcopy["transactions"]:
-                if tx.get("is_sensitive","0") == "1":
-                    pass
-                else:
-                    new_txs.append(tx)
-            blockcopy["transactions"] = new_txs
-        pruned_chain.append(blockcopy)
+            block["transactions"] = [
+                tx for tx in block["transactions"]
+                if tx.get("is_sensitive", "0") != "1"
+            ]
+        pruned_chain.append(block)
 
     return jsonify({"chain": pruned_chain, "length": len(pruned_chain)}),200
 @app.route('/node/upload', methods=['POST'])
@@ -925,6 +1147,31 @@ def node_upload():
     enc_nonce_b64 = request.form.get('enc_nonce_b64','')
     enc_tag_b64   = request.form.get('enc_tag_b64','')
 
+    with blockchain.lock:
+        if is_sensitive == "1" and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
+            store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
+
+        local_abs = os.path.join(".", file_path.lstrip("./"))
+
+        os.makedirs(os.path.dirname(local_abs), exist_ok=True)
+        upfile.save(local_abs)
+
+        idx = blockchain.add_transaction(
+            tx_id           = tx_id,
+            sender          = sender,
+            recipient       = recipient,
+            file_name       = file_name,
+            file_path       = file_path,
+            alias           = alias,
+            recipient_alias = recipient_alias,
+            signature       = signature,
+            is_sensitive    = is_sensitive
+        )
+    if not idx:
+        return jsonify({"error":"Invalid signature"}), 400
+
+    return jsonify({"message":f"File received, block = {idx}"}), 201
+   
     if is_sensitive == "1" and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
         store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
 
@@ -1007,6 +1254,18 @@ def new_transaction():
     if not all(k in data for k in needed):
         return "Missing values",400
 
+    with blockchain.lock:
+        idx = blockchain.add_transaction(
+            tx_id           = data["tx_id"],
+            sender          = data['sender'],
+            recipient       = data['recipient'],
+            file_name       = data['file_name'],
+            file_path       = data['file_path'],
+            alias           = data.get('alias',''),
+            recipient_alias = data.get('recipient_alias',''),
+            signature       = data['signature'],
+            is_sensitive    = data.get('is_sensitive','0')
+        )
     try:
         data['file_name'] = _ensure_safe_filename(data['file_name'])
     except ValueError:
@@ -1059,7 +1318,10 @@ def get_transactions():
     """
     Returns the current list of pending transactions (not yet in a block).
     """
-    return jsonify({"transactions": blockchain.transactions}),200
+    import copy
+    with blockchain.lock:
+        tx_snapshot = copy.deepcopy(blockchain.transactions)
+    return jsonify({"transactions": tx_snapshot}),200
 
 @app.route('/file/<filename>', methods=['GET'])
 def get_file(filename):
@@ -1078,8 +1340,12 @@ def decrypt_file(tx_id):
     if we have stored the AES key, nonce, tag in keys_db.json.
     Returns the original content as a downloadable file.
     """
+    import copy
+    with blockchain.lock:
+        chain_snapshot = copy.deepcopy(blockchain.chain)
+
     file_name = None
-    for block in blockchain.chain:
+    for block in chain_snapshot:
         for tx in block["transactions"]:
             if tx.get("tx_id") == tx_id:
                 if tx.get("is_sensitive","0") != "1":
@@ -1145,12 +1411,14 @@ def register_nodes():
     if not node_netlocs:
         return "Error: no nodes",400
 
-    for netloc in node_netlocs:
-        blockchain.add_node(netloc.strip())
+    with blockchain.lock:
+        for netloc in node_netlocs:
+            blockchain.add_node(netloc.strip())
+        nodes_snapshot = list(blockchain.nodes)
 
     return jsonify({
         "message": "Nodes added",
-        "total_nodes": list(blockchain.nodes)
+        "total_nodes": nodes_snapshot
     }),201
 
 @app.route('/nodes/remove', methods=['POST'])
@@ -1160,14 +1428,17 @@ def remove_node():
         return jsonify({"message":"Missing node address"}),400
 
     rm = d['node'].strip()
-    rem = blockchain.remove_node(rm)
+    with blockchain.lock:
+        rem = blockchain.remove_node(rm)
     if rem:
         return jsonify({"message": f"Node {rm} removed"}),200
     return jsonify({"message":"Node not found"}),404
 
 @app.route('/nodes/get', methods=['GET'])
 def get_nodes():
-    return jsonify({"total_nodes": list(blockchain.nodes)}),200
+    with blockchain.lock:
+        nodes_snapshot = list(blockchain.nodes)
+    return jsonify({"total_nodes": nodes_snapshot}),200
 
 @app.route('/trusted_nodes/register', methods=['POST'])
 def register_trusted_nodes():
@@ -1180,12 +1451,14 @@ def register_trusted_nodes():
     if not node_netlocs:
         return jsonify({"message": "No trusted nodes"}),400
 
-    for netloc in node_netlocs:
-        blockchain.add_trusted_node(netloc.strip())
+    with blockchain.lock:
+        for netloc in node_netlocs:
+            blockchain.add_trusted_node(netloc.strip())
+        trusted_snapshot = list(blockchain.trusted_nodes)
 
     return jsonify({
         "message": "Trusted nodes added",
-        "trusted_nodes": list(blockchain.trusted_nodes)
+        "trusted_nodes": trusted_snapshot
     }),201
 
 @app.route('/trusted_nodes/remove', methods=['POST'])
@@ -1194,6 +1467,48 @@ def remove_trusted_node():
     if 'node' not in d:
         return jsonify({"message":"Missing node address"}),400
 
+    rm = d['node'].strip()
+    with blockchain.lock:
+        rem = blockchain.remove_trusted_node(rm)
+    if rem:
+        return jsonify({"message": f"Trusted node {rm} removed"}),200
+    return jsonify({"message":"Trusted node not found"}),404
+
+@app.route('/trusted_nodes/get', methods=['GET'])
+def get_trusted_nodes():
+    with blockchain.lock:
+        trusted_snapshot = list(blockchain.trusted_nodes)
+    return jsonify({
+        "trusted_nodes": trusted_snapshot
+    }),200
+
+@app.route('/nodes/resolve', methods=['GET'])
+def consensus():
+    with blockchain.lock:
+        replaced = blockchain.resolve_conflicts()
+    if replaced:
+        return jsonify({"message":"Chain replaced"}),200
+    return jsonify({"message":"Chain is authoritative"}),200
+
+@app.route('/sync', methods=['GET'])
+def manual_sync():
+    with blockchain.lock:
+        blockchain.sync_files()
+    return jsonify({"message":"sync done"}),200
+
+def auto_sync_conflicts(interval=10):
+    """
+    Periodically calls resolve_conflicts() in a background thread.
+    Default interval = 10s. Adjust as needed.
+    """
+    while True:
+        time.sleep(interval)
+        with blockchain.lock:
+            replaced = blockchain.resolve_conflicts()
+        if replaced:
+            logging.info("Chain replaced.")
+        else:
+            logging.info("Chain is authoritative.")
     rm = d['node'].strip()
     rem = blockchain.remove_trusted_node(rm)
     if rem:
