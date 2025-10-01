@@ -13,14 +13,14 @@ import binascii
 import json
 import logging
 import datetime
-	
+
 import time
 import threading
 import requests
 
 from flask import Flask, jsonify, request, render_template, send_from_directory, send_file, abort
 from flask_cors import CORS
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from Crypto.PublicKey import RSA
 from Crypto.Hash import SHA256
 from Crypto.Signature import pkcs1_15
@@ -46,6 +46,15 @@ os.makedirs(UPLOAD_FOLDER,  exist_ok=True)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'txt','pdf','png','jpg','jpeg','gif','docx'}
+
+SYNC_CHAIN_TIMEOUT = float(os.getenv("SYNC_CHAIN_TIMEOUT", "4"))
+SYNC_DOWNLOAD_TIMEOUT = float(os.getenv("SYNC_DOWNLOAD_TIMEOUT", "4"))
+SYNC_MAX_RETRIES = int(os.getenv("SYNC_MAX_RETRIES", "3"))
+SYNC_BACKOFF_INITIAL = float(os.getenv("SYNC_BACKOFF_INITIAL", "0.5"))
+SYNC_BACKOFF_MULTIPLIER = float(os.getenv("SYNC_BACKOFF_MULTIPLIER", "2"))
+SYNC_FAILURE_LOG_SIZE = int(os.getenv("SYNC_FAILURE_LOG_SIZE", "200"))
+SYNC_DEFERRED_RETRY_LIMIT = int(os.getenv("SYNC_DEFERRED_RETRY_LIMIT", "3"))
+SYNC_DEFERRED_RETRY_DELAY = float(os.getenv("SYNC_DEFERRED_RETRY_DELAY", "15"))
 
 def _ensure_safe_filename(name: str) -> str:
     safe_name = secure_filename(name)
@@ -115,6 +124,27 @@ def get_encryption_keys(tx_id):
 # Blockchain class
 ###################################
 class Blockchain:
+    def __init__(self):
+        self.transactions = []
+        self.chain = []
+        self.nodes = set()           # "ip:port" for untrusted
+        self.trusted_nodes = set()   # "ip:port" for trusted
+        self.sync_chain_timeout = SYNC_CHAIN_TIMEOUT
+        self.sync_download_timeout = SYNC_DOWNLOAD_TIMEOUT
+        self.sync_max_retries = max(1, SYNC_MAX_RETRIES)
+        self.sync_backoff_initial = max(0.0, SYNC_BACKOFF_INITIAL)
+        self.sync_backoff_multiplier = max(1.0, SYNC_BACKOFF_MULTIPLIER)
+        self.deferred_retry_limit = max(0, SYNC_DEFERRED_RETRY_LIMIT)
+        self.deferred_retry_delay = max(0.0, SYNC_DEFERRED_RETRY_DELAY)
+        self.sync_failure_log = deque(maxlen=max(1, SYNC_FAILURE_LOG_SIZE))
+        self._sync_failure_lock = threading.Lock()
+        self._deferred_retry_lock = threading.Lock()
+        self._pending_deferred_retries = {}
+
+        if os.path.exists(DATA_FILE):
+            self.load_data()
+            if len(self.chain) == 0:
+                self.create_block(proof=100, previous_hash='1')
     def __init__(self):
         self._lock = threading.RLock()
         self.transactions = []
@@ -408,6 +438,157 @@ class Blockchain:
         from Crypto.Hash import SHA256
         return SHA256.new(s).hexdigest()
 
+    def valid_chain(self, chain):
+        """
+        Simple chain validity check: ensure each block's previous_hash matches
+        the hash of the previous block.
+        """
+        last_block = chain[0]
+        idx = 1
+        while idx < len(chain):
+            block = chain[idx]
+            if block['previous_hash'] != self.hash(last_block):
+                return False
+            last_block = block
+            idx += 1
+        return True
+
+    def _record_sync_failure(self, operation, netloc, filename=None, error=None, attempt=None, stage="immediate"):
+        entry = {
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "operation": operation,
+            "netloc": netloc,
+            "filename": filename,
+            "error": str(error) if error is not None else None,
+            "attempt": attempt,
+            "stage": stage,
+        }
+        with self._sync_failure_lock:
+            self.sync_failure_log.append(entry)
+        target = f"{operation} sync failure for {netloc}"
+        if filename:
+            target += f"/{filename}"
+        extra = f" attempt {attempt}" if attempt is not None else ""
+        logging.warning(f"{target}{extra} during {stage}: {error}")
+
+    def _fetch_chain_with_retry(self, netloc):
+        url = f"http://{netloc}/chain"
+        delay = self.sync_backoff_initial
+        for attempt in range(1, self.sync_max_retries + 1):
+            try:
+                response = requests.get(url, timeout=self.sync_chain_timeout)
+                if response.status_code == 200:
+                    return response.json().get('chain', [])
+                self._record_sync_failure("chain", netloc, error=f"HTTP {response.status_code}", attempt=attempt)
+            except requests.exceptions.RequestException as exc:
+                self._record_sync_failure("chain", netloc, error=exc, attempt=attempt)
+            if attempt < self.sync_max_retries:
+                sleep_for = delay if delay > 0 else 0
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                delay = delay * self.sync_backoff_multiplier if self.sync_backoff_multiplier > 1 else delay
+        return None
+
+    def _download_file_with_retry(self, netloc, tx, local_abs, stage="immediate", attempt_offset=0):
+        filename = tx.get("file_name")
+        if not filename:
+            return False
+        url = f"http://{netloc}/file/{filename}"
+        delay = self.sync_backoff_initial
+        for attempt in range(1, self.sync_max_retries + 1):
+            try:
+                response = requests.get(url, stream=True, timeout=self.sync_download_timeout)
+                if response.status_code == 200:
+                    os.makedirs(os.path.dirname(local_abs), exist_ok=True)
+                    with open(local_abs, 'wb') as f:
+                        for chunk in response.iter_content(4096):
+                            f.write(chunk)
+                    return True
+                self._record_sync_failure(
+                    "download",
+                    netloc,
+                    filename=filename,
+                    error=f"HTTP {response.status_code}",
+                    attempt=attempt + attempt_offset,
+                    stage=stage,
+                )
+            except requests.exceptions.RequestException as exc:
+                self._record_sync_failure(
+                    "download",
+                    netloc,
+                    filename=filename,
+                    error=exc,
+                    attempt=attempt + attempt_offset,
+                    stage=stage,
+                )
+            if attempt < self.sync_max_retries:
+                sleep_for = delay if delay > 0 else 0
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                delay = delay * self.sync_backoff_multiplier if self.sync_backoff_multiplier > 1 else delay
+        return False
+
+    def _clear_deferred_retry(self, key):
+        with self._deferred_retry_lock:
+            if key in self._pending_deferred_retries:
+                del self._pending_deferred_retries[key]
+
+    def _schedule_deferred_retry(self, netloc, tx, attempt):
+        if self.deferred_retry_limit == 0 or attempt > self.deferred_retry_limit:
+            return
+        file_path = tx.get("file_path")
+        if not file_path:
+            return
+        key = (netloc, file_path)
+        with self._deferred_retry_lock:
+            current_attempt = self._pending_deferred_retries.get(key, 0)
+            if attempt <= current_attempt:
+                return
+            self._pending_deferred_retries[key] = attempt
+
+        delay = self.deferred_retry_delay * (self.sync_backoff_multiplier ** (attempt - 1)) if self.deferred_retry_delay > 0 else 0
+        logging.info(f"Scheduling deferred retry #{attempt} for {file_path} from {netloc} in {delay:.2f}s")
+        timer = threading.Timer(delay, self._deferred_retry_worker, args=(netloc, dict(tx), attempt))
+        timer.daemon = True
+        timer.start()
+
+    def _deferred_retry_worker(self, netloc, tx, attempt):
+        file_path = tx.get("file_path")
+        if not file_path:
+            return
+        key = (netloc, file_path)
+        local_abs = os.path.join(".", file_path)
+        if os.path.exists(local_abs):
+            self._clear_deferred_retry(key)
+            return
+        success = self._download_file_with_retry(netloc, tx, local_abs, stage="deferred", attempt_offset=attempt - 1)
+        if success:
+            self._clear_deferred_retry(key)
+            return
+
+        next_attempt = attempt + 1
+        if next_attempt <= self.deferred_retry_limit:
+            self._schedule_deferred_retry(netloc, tx, next_attempt)
+        else:
+            self._record_sync_failure(
+                "download",
+                netloc,
+                filename=tx.get("file_name"),
+                error="Exceeded deferred retry limit",
+                attempt=attempt,
+                stage="deferred",
+            )
+            self._clear_deferred_retry(key)
+
+    def get_sync_failures(self, limit=None):
+        with self._sync_failure_lock:
+            records = list(self.sync_failure_log)
+        if limit is not None and limit > 0:
+            records = records[-limit:]
+        return [dict(item) for item in records]
+
+    def resolve_conflicts(self):
+
     @staticmethod
     def derive_public_key_hex(private_key_hex):
         priv_key = RSA.importKey(binascii.unhexlify(private_key_hex))
@@ -667,6 +848,34 @@ class Blockchain:
             replaced = True
         return replaced
 
+    def sync_files(self):
+        """
+        For each node (trusted or not), retrieve /chain. For each transaction:
+        if is_sensitive=1 and the node is not in self.trusted_nodes => skip.
+        Otherwise, try to download the file from /file/<filename>.
+        """
+        all_netlocs = self.nodes.union(self.trusted_nodes)
+        for netloc in all_netlocs:
+            chain_data = self._fetch_chain_with_retry(netloc)
+            if not chain_data:
+                continue
+            for block in chain_data:
+                for tx in block.get('transactions', []):
+                    if tx.get("is_sensitive", "0") == "1" and netloc not in self.trusted_nodes:
+                        continue
+                    fp = tx.get("file_path", "")
+                    if not fp or not fp.startswith("./uploads/"):
+                        continue
+                    local_abs = os.path.join(".", fp)
+                    key = (netloc, fp)
+                    if os.path.exists(local_abs):
+                        self._clear_deferred_retry(key)
+                        continue
+                    success = self._download_file_with_retry(netloc, tx, local_abs)
+                    if success:
+                        self._clear_deferred_retry(key)
+                        continue
+                    self._schedule_deferred_retry(netloc, tx, attempt=1)
     def sync_files(self):
         """
         For each node (trusted or not), retrieve /chain. For each transaction:
@@ -1521,6 +1730,22 @@ def get_trusted_nodes():
         "trusted_nodes": list(blockchain.trusted_nodes)
     }),200
 
+@app.route('/nodes/resolve', methods=['GET'])
+def consensus():
+    replaced = blockchain.resolve_conflicts()
+    if replaced:
+        return jsonify({"message":"Chain replaced"}),200
+    return jsonify({"message":"Chain is authoritative"}),200
+
+@app.route('/sync/failures', methods=['GET'])
+def sync_failures():
+    limit = request.args.get('limit', type=int)
+    return jsonify({"failures": blockchain.get_sync_failures(limit=limit)}), 200
+
+@app.route('/sync', methods=['GET'])
+def manual_sync():
+    blockchain.sync_files()
+    return jsonify({"message":"sync done"}),200
 @app.route('/trusted_nodes/keys', methods=['GET'])
 def get_trusted_node_keys():
     if not _request_from_trusted():
