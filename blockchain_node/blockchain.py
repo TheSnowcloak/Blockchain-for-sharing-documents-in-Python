@@ -47,6 +47,24 @@ os.makedirs(UPLOAD_FOLDER,  exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'txt','pdf','png','jpg','jpeg','gif','docx'}
 
+def _ensure_safe_filename(name: str) -> str:
+    safe_name = secure_filename(name)
+    if not safe_name or safe_name != name:
+        raise ValueError("Invalid filename")
+    return safe_name
+
+def _is_safe_subpath(path_value: str, base_directory: str) -> bool:
+    if not path_value:
+        return False
+    if os.path.isabs(path_value):
+        return False
+    normalized = os.path.normpath(path_value)
+    if normalized.startswith('..'):
+        return False
+    abs_base = os.path.abspath(base_directory)
+    abs_target = os.path.abspath(os.path.join('.', normalized.lstrip('./')))
+    return abs_target.startswith(os.path.join(abs_base, ''))
+
 ###################################
 # Utility to unify IP:port format
 ###################################
@@ -136,17 +154,36 @@ class Blockchain:
         return False
 
     def create_block(self, proof, previous_hash, system_override=False):
+    def get_transaction_by_id(self, tx_id):
+        for t in self.transactions:
+            if t.get("tx_id") == tx_id:
+                return t
+        for block in self.chain:
+            for t in block["transactions"]:
+                if t.get("tx_id") == tx_id:
+                    return t
+        return None
+
+    def create_block(self, proof, previous_hash):
         # Move files from pending_uploads to uploads upon block creation
         for tx in self.transactions:
             fp = tx.get("file_path")
-            if fp and fp.startswith("./pending_uploads/"):
+            if not fp:
+                continue
+
+            target_path = fp
+            if fp.startswith("./pending_uploads/"):
+                target_path = fp.replace("pending_uploads", "uploads", 1)
                 old_abs = os.path.join(".", fp)
+                new_abs = os.path.join(".", target_path)
                 if os.path.exists(old_abs):
-                    new_path = fp.replace("pending_uploads", "uploads", 1)
-                    new_abs  = os.path.join(".", new_path)
                     os.makedirs(os.path.dirname(new_abs), exist_ok=True)
                     os.rename(old_abs, new_abs)
-                    tx["file_path"] = new_path
+            elif not fp.startswith("./uploads/"):
+                # Normalize any unexpected value to uploads/<basename>
+                target_path = os.path.join("./uploads", os.path.basename(fp))
+
+            tx["file_path"] = target_path
 
         if not system_override and not self.is_authorized_validator():
             raise PermissionError("This node is not authorized to propose blocks.")
@@ -175,6 +212,21 @@ class Blockchain:
         self.save_data()
         return block
 
+    def _build_signable_transaction(self, transaction_dict):
+        """Return an OrderedDict containing only the fields that are signed."""
+        from collections import OrderedDict
+
+        signable_fields = (
+            "tx_id",
+            "sender",
+            "recipient",
+            "file_name",
+            "alias",
+            "recipient_alias",
+            "is_sensitive",
+        )
+        return OrderedDict((field, transaction_dict.get(field, "")) for field in signable_fields)
+
     def add_transaction(self,
                         tx_id,
                         sender,
@@ -184,6 +236,8 @@ class Blockchain:
                         alias,
                         recipient_alias,
                         signature,
+                        is_sensitive="0",
+                        file_owner=None):
                         is_sensitive="0"):
         # Ignore if transaction already in chain
         if self.transaction_exists(tx_id):
@@ -191,6 +245,8 @@ class Blockchain:
             return self.last_block['index']
 
         # Build transaction dictionary
+        from collections import OrderedDict
+        base_tr = OrderedDict({
         from collections import OrderedDict
         tr = OrderedDict({
             "tx_id":           tx_id,
@@ -205,7 +261,21 @@ class Blockchain:
 
         # If not a mining reward, verify signature
         if sender != MINING_SENDER:
-            if not self.verify_signature(sender, signature, tr):
+            if not self.verify_signature(sender, signature, base_tr):
+                logging.error("Signature invalid!")
+                return False
+
+        tr = OrderedDict(base_tr)
+        if file_owner:
+            try:
+                owner_netloc = normalize_netloc(file_owner)
+            except Exception:
+                owner_netloc = file_owner
+            tr["file_owner"] = owner_netloc
+
+        self.transactions.append(tr)
+            signable = self._build_signable_transaction(tr)
+            if not self.verify_signature(sender, signature, signable):
                 logging.error("Signature invalid!")
                 return False
 
@@ -488,6 +558,7 @@ class Blockchain:
         Otherwise, try to download the file from /file/<filename>.
         """
         all_netlocs = self.nodes.union(self.trusted_nodes)
+        ordered_netlocs = list(all_netlocs)
         for netloc in all_netlocs:
             try:
                 url = f"http://{netloc}/chain"
@@ -503,16 +574,35 @@ class Blockchain:
                                 local_abs = os.path.join(".", fp)
                                 if not os.path.exists(local_abs):
                                     fn = tx["file_name"]
-                                    downurl = f"http://{netloc}/file/{fn}"
-                                    try:
-                                        fresp = requests.get(downurl, stream=True, timeout=4)
-                                        if fresp.status_code == 200:
-                                            os.makedirs(os.path.dirname(local_abs), exist_ok=True)
-                                            with open(local_abs, 'wb') as f:
-                                                for chunk in fresp.iter_content(4096):
-                                                    f.write(chunk)
-                                    except requests.exceptions.RequestException:
-                                        pass
+                                    candidates = []
+
+                                    def add_candidate(host):
+                                        if not host:
+                                            return
+                                    
+                                        normalized = normalize_netloc(host)
+                                        if normalized not in candidates:
+                                            candidates.append(normalized)
+
+                                    add_candidate(netloc)
+                                    add_candidate(tx.get("file_owner"))
+                                    for other in ordered_netlocs:
+                                        add_candidate(other)
+
+                                    for host in candidates:
+                                        if tx.get("is_sensitive", "0") == "1" and host not in self.trusted_nodes:
+                                            continue
+                                        downurl = f"http://{host}/file/{fn}"
+                                        try:
+                                            fresp = requests.get(downurl, stream=True, timeout=4)
+                                            if fresp.status_code == 200:
+                                                os.makedirs(os.path.dirname(local_abs), exist_ok=True)
+                                                with open(local_abs, 'wb') as f:
+                                                    for chunk in fresp.iter_content(4096):
+                                                        f.write(chunk)
+                                                break
+                                        except requests.exceptions.RequestException:
+                                            continue
             except requests.exceptions.RequestException:
                 pass
 
@@ -580,6 +670,45 @@ class Blockchain:
             "transactions":  self.transactions,
             "validator_public_keys": self.validator_public_keys,
             "quorum_threshold": self.quorum_threshold
+        }
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        logging.info("Blockchain data saved.")
+    def broadcast_new_transaction(self, tx_dict):
+        """
+        If transaction is sensitive => only broadcast to trusted_nodes,
+        else broadcast to everyone.
+        """
+        if tx_dict.get("is_sensitive","0") == "1":
+            targets = self.trusted_nodes
+            logging.info("Broadcast CITLIVÉ => only to trusted nodes.")
+        else:
+            targets = self.nodes.union(self.trusted_nodes)
+
+        tx_payload = dict(tx_dict)
+        owner = tx_payload.get("file_owner")
+        if not owner and tx_dict.get("tx_id"):
+            existing_tx = self.get_transaction_by_id(tx_dict["tx_id"])
+            if existing_tx:
+                owner = existing_tx.get("file_owner")
+                if owner:
+                    tx_payload["file_owner"] = owner
+
+        for netloc in targets:
+            try:
+                url = f"http://{netloc}/transactions/new"
+                data = dict(tx_payload)
+                data["skip_broadcast"] = True
+                requests.post(url, json=data, timeout=3)
+            except requests.exceptions.RequestException as e:
+                logging.warning(f"Broadcast to {netloc} failed: {e}")
+
+    def save_data(self):
+        data = {
+            "chain":         self.chain,
+            "nodes":         list(self.nodes),
+            "trusted_nodes": list(self.trusted_nodes),
+            "transactions":  self.transactions
         }
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
@@ -805,12 +934,58 @@ def node_upload():
     os.makedirs(os.path.dirname(local_abs), exist_ok=True)
     upfile.save(local_abs)
 
+    file_owner = normalize_netloc(request.host)
+    if not file_name:
+        return jsonify({"error":"Missing file_name in form data"}), 400
+
+    provided_path = request.form.get('file_path', '')
+    if provided_path and not _is_safe_subpath(provided_path, PENDING_FOLDER):
+        return jsonify({"error": "Invalid file_path supplied"}), 400
+
+    try:
+        safe_file_name = _ensure_safe_filename(file_name)
+    except ValueError:
+        return jsonify({"error": "Invalid file_name supplied"}), 400
+
+    pending_filename = f"{uuid4().hex}_{safe_file_name}"
+    pending_rel = os.path.join(PENDING_FOLDER, pending_filename)
+    pending_abs = os.path.abspath(pending_rel)
+    pending_root = os.path.abspath(PENDING_FOLDER)
+
+    if not pending_abs.startswith(os.path.join(pending_root, '')):
+        return jsonify({"error": "Failed to derive safe pending path"}), 400
+
+
+    enc_key_b64   = request.form.get('enc_key_b64','')
+    enc_nonce_b64 = request.form.get('enc_nonce_b64','')
+    enc_tag_b64   = request.form.get('enc_tag_b64','')
+
+    if is_sensitive == "1" and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
+        store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
+
+    os.makedirs(os.path.dirname(pending_abs), exist_ok=True)
+    upfile.save(pending_abs)
+
+    canonical_file_path = os.path.join(PENDING_FOLDER, pending_filename)
+
     idx = blockchain.add_transaction(
         tx_id           = tx_id,
         sender          = sender,
         recipient       = recipient,
         file_name       = file_name,
         file_path       = file_path,
+        alias           = alias,
+        recipient_alias = recipient_alias,
+        signature       = signature,
+        is_sensitive    = is_sensitive,
+        file_owner      = file_owner
+    )
+    if not idx:
+        return jsonify({"error":"Invalid signature"}), 400
+
+    return jsonify({"message":f"File received, block = {idx}"}), 201
+        file_name       = safe_file_name,
+        file_path       = canonical_file_path,
         alias           = alias,
         recipient_alias = recipient_alias,
         signature       = signature,
@@ -832,10 +1007,38 @@ def new_transaction():
     if not all(k in data for k in needed):
         return "Missing values",400
 
+    try:
+        data['file_name'] = _ensure_safe_filename(data['file_name'])
+    except ValueError:
+        return "Invalid file_name", 400
+
+    file_path_value = data['file_path']
+    if not (_is_safe_subpath(file_path_value, PENDING_FOLDER) or _is_safe_subpath(file_path_value, UPLOAD_FOLDER)):
+        return "Invalid file_path", 400
+
     idx = blockchain.add_transaction(
         tx_id           = data["tx_id"],
         sender          = data['sender'],
         recipient       = data['recipient'],
+        file_name       = data['file_name'],
+        file_path       = data['file_path'],
+        alias           = data.get('alias',''),
+        recipient_alias = data.get('recipient_alias',''),
+        signature       = data['signature'],
+        is_sensitive    = data.get('is_sensitive','0'),
+        file_owner      = data.get('file_owner')
+    )
+    if not idx:
+        return "Invalid signature",400
+
+    stored_tx = blockchain.get_transaction_by_id(data["tx_id"])
+    if stored_tx and stored_tx.get("file_owner"):
+        data['file_owner'] = stored_tx['file_owner']
+
+    if idx and not skip_broadcast:
+        blockchain.broadcast_new_transaction(data)
+
+    return jsonify({"message": f"Transaction will be added to block {idx}"}),201
         file_name       = data['file_name'],
         file_path       = data['file_path'],
         alias           = data.get('alias',''),
