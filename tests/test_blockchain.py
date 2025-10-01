@@ -120,3 +120,70 @@ def test_sync_files_downloads_from_recorded_owner(isolated_blockchain, monkeypat
     assert downloaded.exists(), "File should be downloaded from the recorded owner"
     assert downloaded.read_bytes() == file_bytes
     assert "http://owner-host:6001/file/shared.txt" in calls
+
+
+def test_sync_files_skips_owner_when_local_node(isolated_blockchain, monkeypatch):
+    bc, module = isolated_blockchain
+
+    bc.validator_netloc = "owner-host:6001"
+
+    tx = {
+        "tx_id": "tx-owner",
+        "sender": "sender",
+        "recipient": "recipient",
+        "file_name": "shared.txt",
+        "file_path": "./uploads/shared.txt",
+        "alias": "",
+        "recipient_alias": "",
+        "is_sensitive": "0",
+        "file_owner": "owner-host:6001",
+    }
+
+    bc.chain = [{
+        "index": 1,
+        "timestamp": "now",
+        "transactions": [tx],
+        "proof": 100,
+        "previous_hash": "hash",
+    }]
+    bc.nodes = {"peer-b:5000"}
+
+    downloaded = Path("uploads/shared.txt")
+    assert not downloaded.exists()
+
+    class DummyResponse:
+        def __init__(self, status, json_data=None, content=b""):
+            self.status_code = status
+            self._json = json_data
+            self._content = content
+
+        def json(self):
+            if self._json is None:
+                raise ValueError("No JSON body")
+            return self._json
+
+        def iter_content(self, chunk_size):
+            yield self._content
+
+    calls = []
+    scheduled = []
+
+    def fake_get(url, *args, **kwargs):
+        calls.append(url)
+        if url == "http://peer-b:5000/chain":
+            return DummyResponse(200, {"chain": bc.chain})
+        if url == "http://peer-b:5000/file/shared.txt":
+            return DummyResponse(404)
+        raise AssertionError(f"Unexpected URL requested: {url}")
+
+    def fake_schedule(self, target_netloc, tx_arg, attempt):
+        scheduled.append((target_netloc, attempt))
+
+    monkeypatch.setattr(module.requests, "get", fake_get)
+    monkeypatch.setattr(module.Blockchain, "_schedule_deferred_retry", fake_schedule, raising=False)
+
+    bc.sync_files()
+
+    assert not downloaded.exists(), "File should not have been downloaded"
+    assert "http://owner-host:6001/file/shared.txt" not in calls
+    assert scheduled == [("peer-b:5000", 1)]
