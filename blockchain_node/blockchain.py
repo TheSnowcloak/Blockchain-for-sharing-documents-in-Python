@@ -36,6 +36,7 @@ CORS(app)
 
 DATA_FILE       = 'blockchain_data.json'
 KEYS_DB_FILE    = 'keys_db.json'      # store encryption keys for demonstration
+VALIDATOR_IDENTITY_FILE = 'validator_identity.json'
 MINING_SENDER   = "THE BLOCKCHAIN"
 
 PENDING_FOLDER = './pending_uploads'
@@ -119,13 +120,21 @@ class Blockchain:
         self.chain = []
         self.nodes = set()           # "ip:port" for untrusted
         self.trusted_nodes = set()   # "ip:port" for trusted
+        self.validator_public_keys = {}
+        self.quorum_threshold = 1
+        self.validator_id = None
+        self.validator_public_key_hex = None
+        self.validator_private_key_hex = None
+        self.validator_netloc = None
+
+        self.load_validator_identity()
 
         if os.path.exists(DATA_FILE):
             self.load_data()
             if len(self.chain) == 0:
-                self.create_block(proof=100, previous_hash='1')
+                self.create_block(proof=100, previous_hash='1', system_override=True)
         else:
-            self.create_block(proof=100, previous_hash='1')
+            self.create_block(proof=100, previous_hash='1', system_override=True)
             self.save_data()
 
         # Example: add "11.222.33.44:5555" to trusted nodes, You can uncomment 2 lines bellow to add a node to trusted nodes.
@@ -144,6 +153,7 @@ class Blockchain:
                     return True
         return False
 
+    def create_block(self, proof, previous_hash, system_override=False):
     def get_transaction_by_id(self, tx_id):
         for t in self.transactions:
             if t.get("tx_id") == tx_id:
@@ -175,6 +185,9 @@ class Blockchain:
 
             tx["file_path"] = target_path
 
+        if not system_override and not self.is_authorized_validator():
+            raise PermissionError("This node is not authorized to propose blocks.")
+
         block = {
             "index":        len(self.chain) + 1,
             "timestamp":    str(datetime.datetime.now()),
@@ -182,6 +195,18 @@ class Blockchain:
             "proof":        proof,
             "previous_hash": previous_hash
         }
+
+        if system_override:
+            block["validator_id"] = self.validator_id or "GENESIS"
+            block["validator_signatures"] = []
+        else:
+            block["validator_id"] = self.validator_id
+            signature_hex = self._sign_block(block)
+            block["validator_signatures"] = [{
+                "validator_id": self.validator_id,
+                "signature": signature_hex
+            }]
+
         self.chain.append(block)
         self.transactions = []
         self.save_data()
@@ -261,7 +286,10 @@ class Blockchain:
             logging.info("Reached 5 pending TX. Auto-mining new block.")
             last_block = self.last_block
             prev_hash  = self.hash(last_block)
-            self.create_block(proof=100, previous_hash=prev_hash)
+            try:
+                self.create_block(proof=100, previous_hash=prev_hash)
+            except PermissionError as exc:
+                logging.error(f"Auto-mining skipped: {exc}")
 
         return self.last_block['index']
 
@@ -292,16 +320,182 @@ class Blockchain:
         from Crypto.Hash import SHA256
         return SHA256.new(s).hexdigest()
 
+    @staticmethod
+    def derive_public_key_hex(private_key_hex):
+        priv_key = RSA.importKey(binascii.unhexlify(private_key_hex))
+        return binascii.hexlify(priv_key.publickey().exportKey(format='DER')).decode('ascii')
+
+    @staticmethod
+    def _block_signature_payload(block):
+        payload = OrderedDict([
+            ("index", block["index"]),
+            ("timestamp", block["timestamp"]),
+            ("transactions", block["transactions"]),
+            ("proof", block["proof"]),
+            ("previous_hash", block["previous_hash"]),
+        ])
+        return json.dumps(payload, sort_keys=True)
+
+    def _sign_block(self, block):
+        if not self.validator_private_key_hex:
+            raise ValueError("Validator private key is not configured")
+        payload = self._block_signature_payload(block)
+        priv_key = RSA.importKey(binascii.unhexlify(self.validator_private_key_hex))
+        signer = pkcs1_15.new(priv_key)
+        signature = signer.sign(SHA256.new(payload.encode('utf-8')))
+        return binascii.hexlify(signature).decode('ascii')
+
+    def verify_block_signatures(self, block):
+        if block.get("index") == 1 and not block.get("validator_signatures"):
+            # Allow unsigned legacy genesis blocks for backward compatibility
+            return True
+
+        signatures = block.get("validator_signatures", [])
+        if not isinstance(signatures, list):
+            return False
+
+        payload = self._block_signature_payload(block)
+        seen_validators = set()
+        valid_count = 0
+
+        for sig_entry in signatures:
+            validator_id = sig_entry.get("validator_id")
+            signature_hex = sig_entry.get("signature")
+            if not validator_id or not signature_hex:
+                continue
+            if validator_id in seen_validators:
+                continue
+
+            pub_hex = self.validator_public_keys.get(validator_id)
+            if not pub_hex:
+                logging.warning(f"Missing public key for validator {validator_id}")
+                continue
+
+            try:
+                pub_key = RSA.importKey(binascii.unhexlify(pub_hex))
+                verifier = pkcs1_15.new(pub_key)
+                verifier.verify(SHA256.new(payload.encode('utf-8')),
+                                binascii.unhexlify(signature_hex))
+                seen_validators.add(validator_id)
+                valid_count += 1
+            except (ValueError, TypeError, binascii.Error) as exc:
+                logging.warning(f"Invalid validator signature for {validator_id}: {exc}")
+
+        required = max(1, int(self.quorum_threshold))
+        if valid_count < required:
+            logging.warning(
+                f"Block {block.get('index')} signature quorum not satisfied: {valid_count}/{required}")
+            return False
+
+        block_proposer = block.get("validator_id")
+        if block_proposer and block_proposer not in seen_validators:
+            logging.warning(
+                f"Block proposer {block_proposer} is not among valid signatures for block {block.get('index')}")
+            return False
+
+        return True
+
+    def is_authorized_validator(self):
+        if not self.validator_id or not self.validator_private_key_hex:
+            return False
+
+        try:
+            local_public = self.validator_public_key_hex or self.derive_public_key_hex(
+                self.validator_private_key_hex)
+        except (ValueError, TypeError, binascii.Error) as exc:
+            logging.error(f"Failed to derive validator public key: {exc}")
+            return False
+
+        registry_public = self.validator_public_keys.get(self.validator_id)
+        if registry_public and registry_public != local_public:
+            logging.error(
+                "Local validator public key does not match registered key. Rotate or update keys before mining.")
+            return False
+
+        if self.validator_netloc and normalize_netloc(self.validator_netloc) not in self.trusted_nodes:
+            return False
+
+        return True
+
+    def set_quorum_threshold(self, threshold):
+        self.quorum_threshold = max(1, int(threshold))
+        self.save_data()
+
+    def update_validator_public_key(self, validator_id, public_key_hex):
+        self.validator_public_keys[validator_id] = public_key_hex
+        if self.validator_id == validator_id:
+            self.validator_public_key_hex = public_key_hex
+            self.save_validator_identity()
+        self.save_data()
+
+    def set_validator_identity(self, validator_id, private_key_hex, netloc=None, public_key_hex=None):
+        self.validator_id = validator_id
+        self.validator_private_key_hex = private_key_hex
+        if netloc:
+            self.validator_netloc = normalize_netloc(netloc)
+
+        if public_key_hex:
+            self.validator_public_key_hex = public_key_hex
+        else:
+            try:
+                self.validator_public_key_hex = self.derive_public_key_hex(private_key_hex)
+            except (ValueError, TypeError, binascii.Error) as exc:
+                logging.error(f"Could not derive public key from supplied private key: {exc}")
+                self.validator_public_key_hex = None
+
+        if self.validator_id and self.validator_public_key_hex:
+            existing = self.validator_public_keys.get(self.validator_id)
+            if existing != self.validator_public_key_hex:
+                self.validator_public_keys[self.validator_id] = self.validator_public_key_hex
+
+        self.save_validator_identity()
+        self.save_data()
+
+    def add_validator_signature(self, block_index, validator_id, signature_hex):
+        if block_index < 1 or block_index > len(self.chain):
+            return False, "Block not found"
+
+        block = self.chain[block_index - 1]
+        signatures = block.setdefault("validator_signatures", [])
+        for entry in signatures:
+            if entry.get("validator_id") == validator_id:
+                return False, "Validator already signed this block"
+
+        pub_hex = self.validator_public_keys.get(validator_id)
+        if not pub_hex:
+            return False, "Unknown validator"
+
+        payload = self._block_signature_payload(block)
+        try:
+            pub_key = RSA.importKey(binascii.unhexlify(pub_hex))
+            verifier = pkcs1_15.new(pub_key)
+            verifier.verify(SHA256.new(payload.encode('utf-8')),
+                            binascii.unhexlify(signature_hex))
+        except (ValueError, TypeError, binascii.Error) as exc:
+            return False, f"Invalid signature: {exc}"
+
+        signatures.append({
+            "validator_id": validator_id,
+            "signature": signature_hex
+        })
+        self.save_data()
+        return True, block
+
     def valid_chain(self, chain):
         """
         Simple chain validity check: ensure each block's previous_hash matches
         the hash of the previous block.
         """
         last_block = chain[0]
+        if not self.verify_block_signatures(last_block):
+            return False
+
         idx = 1
         while idx < len(chain):
             block = chain[idx]
             if block['previous_hash'] != self.hash(last_block):
+                return False
+            if not self.verify_block_signatures(block):
                 return False
             last_block = block
             idx += 1
@@ -423,6 +617,74 @@ class Blockchain:
         else:
             targets = self.nodes.union(self.trusted_nodes)
 
+        for netloc in targets:
+            try:
+                url = f"http://{netloc}/transactions/new"
+                data = dict(tx_dict)
+                data["skip_broadcast"] = True
+                requests.post(url, json=data, timeout=3)
+            except requests.exceptions.RequestException as e:
+                logging.warning(f"Broadcast to {netloc} failed: {e}")
+
+    def load_validator_identity(self):
+        if not os.path.exists(VALIDATOR_IDENTITY_FILE):
+            return
+        try:
+            with open(VALIDATOR_IDENTITY_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            logging.error(f"Failed to load validator identity: {exc}")
+            return
+
+        self.validator_id = data.get("validator_id") or self.validator_id
+        self.validator_private_key_hex = data.get("private_key_hex") or self.validator_private_key_hex
+        self.validator_public_key_hex = data.get("public_key_hex") or self.validator_public_key_hex
+        netloc = data.get("netloc")
+        if netloc:
+            self.validator_netloc = normalize_netloc(netloc)
+
+        if self.validator_private_key_hex and not self.validator_public_key_hex:
+            try:
+                self.validator_public_key_hex = self.derive_public_key_hex(self.validator_private_key_hex)
+            except (ValueError, TypeError, binascii.Error) as exc:
+                logging.error(f"Unable to derive public key from private key: {exc}")
+
+    def save_validator_identity(self):
+        data = {
+            "validator_id": self.validator_id,
+            "private_key_hex": self.validator_private_key_hex,
+            "public_key_hex": self.validator_public_key_hex,
+            "netloc": self.validator_netloc,
+        }
+        try:
+            with open(VALIDATOR_IDENTITY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except OSError as exc:
+            logging.error(f"Failed to persist validator identity: {exc}")
+
+    def save_data(self):
+        data = {
+            "chain":         self.chain,
+            "nodes":         list(self.nodes),
+            "trusted_nodes": list(self.trusted_nodes),
+            "transactions":  self.transactions,
+            "validator_public_keys": self.validator_public_keys,
+            "quorum_threshold": self.quorum_threshold
+        }
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        logging.info("Blockchain data saved.")
+    def broadcast_new_transaction(self, tx_dict):
+        """
+        If transaction is sensitive => only broadcast to trusted_nodes,
+        else broadcast to everyone.
+        """
+        if tx_dict.get("is_sensitive","0") == "1":
+            targets = self.trusted_nodes
+            logging.info("Broadcast CITLIVÉ => only to trusted nodes.")
+        else:
+            targets = self.nodes.union(self.trusted_nodes)
+
         tx_payload = dict(tx_dict)
         owner = tx_payload.get("file_owner")
         if not owner and tx_dict.get("tx_id"):
@@ -471,11 +733,15 @@ class Blockchain:
             self.nodes         = new_nodes
             self.trusted_nodes = new_trusted
             self.transactions  = d.get("transactions", [])
+            self.validator_public_keys = d.get("validator_public_keys", self.validator_public_keys)
+            self.quorum_threshold = d.get("quorum_threshold", self.quorum_threshold)
         else:
             self.chain = []
             self.nodes = set()
             self.trusted_nodes = set()
             self.transactions = []
+            self.validator_public_keys = {}
+            self.quorum_threshold = 1
 
     def add_node(self, address):
         """
@@ -517,6 +783,15 @@ node_identifier = str(uuid4()).replace('-', '')
 
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 
+
+def _request_from_trusted():
+    caller_ip = request.remote_addr
+    for netloc in blockchain.trusted_nodes:
+        base_ip = netloc.split(":")[0]
+        if base_ip == caller_ip:
+            return True
+    return False
+
 @app.route('/')
 def node_index():
     """
@@ -535,11 +810,43 @@ def configure():
     """
     return render_template('configure.html')
 
+@app.route('/validator/configure', methods=['GET', 'POST'])
+def configure_validator():
+    if request.method == 'GET':
+        return jsonify({
+            "validator_id": blockchain.validator_id,
+            "public_key_hex": blockchain.validator_public_key_hex,
+            "netloc": blockchain.validator_netloc,
+            "is_authorized": blockchain.is_authorized_validator()
+        }), 200
+
+    data = request.get_json() or {}
+    validator_id = data.get('validator_id')
+    private_key = data.get('private_key_hex') or data.get('private_key')
+    netloc = data.get('netloc')
+    public_key = data.get('public_key_hex') or data.get('public_key')
+
+    if not validator_id or not private_key:
+        return jsonify({"message": "validator_id and private_key_hex are required"}), 400
+
+    blockchain.set_validator_identity(validator_id, private_key, netloc=netloc, public_key_hex=public_key)
+
+    return jsonify({
+        "message": "Validator identity updated",
+        "validator_id": blockchain.validator_id,
+        "public_key_hex": blockchain.validator_public_key_hex,
+        "netloc": blockchain.validator_netloc,
+        "is_authorized": blockchain.is_authorized_validator()
+    }), 200
+
 @app.route('/mine', methods=['GET'])
 def mine():
     """
     Example method to auto-mine a new block with a mining reward.
     """
+    if not blockchain.is_authorized_validator():
+        return jsonify({"message": "This node is not authorized to propose blocks."}), 403
+
     last_block = blockchain.last_block
     proof = 100
     blockchain.add_transaction(
@@ -553,7 +860,10 @@ def mine():
         signature=""
     )
     prev_hash = blockchain.hash(last_block)
-    block = blockchain.create_block(proof, prev_hash)
+    try:
+        block = blockchain.create_block(proof, prev_hash)
+    except PermissionError as exc:
+        return jsonify({"message": str(exc)}), 403
     return jsonify({
         "message":"New block forged",
         "index": block["index"],
@@ -895,6 +1205,88 @@ def get_trusted_nodes():
     return jsonify({
         "trusted_nodes": list(blockchain.trusted_nodes)
     }),200
+
+@app.route('/trusted_nodes/keys', methods=['GET'])
+def get_trusted_node_keys():
+    if not _request_from_trusted():
+        return jsonify({"message": "Trusted access required"}), 403
+    return jsonify({
+        "validator_public_keys": blockchain.validator_public_keys,
+        "quorum_threshold": blockchain.quorum_threshold
+    }), 200
+
+@app.route('/trusted_nodes/keys/rotate', methods=['POST'])
+def rotate_trusted_node_key():
+    if not _request_from_trusted():
+        return jsonify({"message": "Trusted access required"}), 403
+
+    data = request.get_json() or {}
+    validator_id = data.get('validator_id')
+    public_key = data.get('public_key_hex') or data.get('public_key')
+    netloc = data.get('netloc')
+
+    if not validator_id or not public_key:
+        return jsonify({"message": "validator_id and public_key_hex are required"}), 400
+
+    blockchain.update_validator_public_key(validator_id, public_key)
+    if netloc:
+        blockchain.add_trusted_node(netloc)
+
+    return jsonify({
+        "message": "Validator key updated",
+        "validator_id": validator_id,
+        "public_key_hex": public_key
+    }), 200
+
+@app.route('/consensus/quorum', methods=['GET', 'POST'])
+def quorum_configuration():
+    if request.method == 'GET':
+        return jsonify({
+            "quorum_threshold": blockchain.quorum_threshold,
+            "known_validators": list(blockchain.validator_public_keys.keys())
+        }), 200
+
+    if not _request_from_trusted():
+        return jsonify({"message": "Trusted access required"}), 403
+
+    data = request.get_json() or {}
+    threshold = data.get('threshold')
+
+    try:
+        threshold_value = int(threshold)
+    except (TypeError, ValueError):
+        return jsonify({"message": "threshold must be an integer >= 1"}), 400
+
+    if threshold_value < 1:
+        return jsonify({"message": "threshold must be >= 1"}), 400
+
+    blockchain.set_quorum_threshold(threshold_value)
+    return jsonify({
+        "message": "Quorum threshold updated",
+        "quorum_threshold": blockchain.quorum_threshold
+    }), 200
+
+@app.route('/blocks/<int:block_index>/approve', methods=['POST'])
+def approve_block(block_index):
+    if not _request_from_trusted():
+        return jsonify({"message": "Trusted access required"}), 403
+
+    data = request.get_json() or {}
+    validator_id = data.get('validator_id')
+    signature_hex = data.get('signature')
+
+    if not validator_id or not signature_hex:
+        return jsonify({"message": "validator_id and signature are required"}), 400
+
+    success, result = blockchain.add_validator_signature(block_index, validator_id, signature_hex)
+    if success:
+        return jsonify({
+            "message": "Signature recorded",
+            "block": result
+        }), 200
+
+    status_code = 404 if result == "Block not found" else 400
+    return jsonify({"message": result}), status_code
 
 @app.route('/nodes/resolve', methods=['GET'])
 def consensus():

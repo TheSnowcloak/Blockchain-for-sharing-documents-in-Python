@@ -77,9 +77,52 @@ The aim is to showcase:
      ```
    - These packages are needed for both the node and the client.
 
-6. **Additional Recommendations**  
+6. **Additional Recommendations**
    - Use HTTPS and restricted access for production, as this demonstration does not include security measures.
    - This is an **example** project illustrating blockchain fundamentals with file sharing, digital signatures, and optional encryption. Further work may be required to make it production-ready.
+
+## Validator authority & key management
+
+- Blocks are now signed by trusted validator nodes. Every block records the proposing validator identity and an RSA signature over the block payload.
+- Only validators that have been registered as trusted nodes *and* have a configured signing identity may forge new blocks. Attempts to mine from unauthorized nodes are rejected by the `/mine` endpoint and during automatic mining.
+- Configure the local validator identity (including private key, optional network location, and derived public key) via:
+  ```http
+  POST /validator/configure
+  {
+    "validator_id": "validator-1",
+    "private_key_hex": "...",
+    "netloc": "127.0.0.1:5000"
+  }
+  ```
+  A `GET /validator/configure` call returns the current identity summary without exposing the private key.
+- Distribute or rotate trusted validator public keys through the trusted-only endpoint:
+  ```http
+  POST /trusted_nodes/keys/rotate
+  {
+    "validator_id": "validator-1",
+    "public_key_hex": "...",
+    "netloc": "127.0.0.1:5000"
+  }
+  ```
+  The `/trusted_nodes/keys` endpoint lets trusted peers retrieve the current key registry for secure distribution.
+- Additional validators can countersign blocks to help satisfy the quorum using:
+  ```http
+  POST /blocks/<index>/approve
+  {
+    "validator_id": "validator-2",
+    "signature": "..."
+  }
+  ```
+  Signatures must be generated from the block payload using the validator's private key; the node verifies the signature with the registered public key before storing it.
+- Configure the quorum requirement (number of trusted signatures required per block) with:
+  ```http
+  POST /consensus/quorum
+  {
+    "threshold": 2
+  }
+  ```
+  A corresponding GET request reports the active threshold and known validators.
+- During conflict resolution the node now validates that every block in a candidate chain satisfies the registered validator signatures and quorum threshold before the chain is adopted.
 
 7. **How to open crypted files (sensitive files)**
      - In the browser (or via Postman/cURL) enter the address of node (`http://IP:PORT/decrypt/TX_ID`) where is generated `keys_db.json` file.
