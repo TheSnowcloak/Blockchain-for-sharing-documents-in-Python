@@ -170,7 +170,6 @@ def upload_form():
         "sender":          spub,
         "recipient":       rpub,
         "file_name":       unique_name,
-        "file_path":       f"./pending_uploads/{unique_name}",
         "alias":           alias,
         "recipient_alias": ralias,
         "is_sensitive":    "1" if is_sensitive else "0"
@@ -187,8 +186,7 @@ def upload_form():
         'recipient_alias':  ralias,
         'is_sensitive':     "1" if is_sensitive else "0",
 
-        'file_name':        unique_name,
-        'file_path':        f"./pending_uploads/{unique_name}"
+        'file_name':        unique_name
     }
 
     # If the file is sensitive, attach encryption keys to the request

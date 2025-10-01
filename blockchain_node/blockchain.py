@@ -46,6 +46,24 @@ os.makedirs(UPLOAD_FOLDER,  exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'txt','pdf','png','jpg','jpeg','gif','docx'}
 
+def _ensure_safe_filename(name: str) -> str:
+    safe_name = secure_filename(name)
+    if not safe_name or safe_name != name:
+        raise ValueError("Invalid filename")
+    return safe_name
+
+def _is_safe_subpath(path_value: str, base_directory: str) -> bool:
+    if not path_value:
+        return False
+    if os.path.isabs(path_value):
+        return False
+    normalized = os.path.normpath(path_value)
+    if normalized.startswith('..'):
+        return False
+    abs_base = os.path.abspath(base_directory)
+    abs_target = os.path.abspath(os.path.join('.', normalized.lstrip('./')))
+    return abs_target.startswith(os.path.join(abs_base, ''))
+
 ###################################
 # Utility to unify IP:port format
 ###################################
@@ -169,6 +187,21 @@ class Blockchain:
         self.save_data()
         return block
 
+    def _build_signable_transaction(self, transaction_dict):
+        """Return an OrderedDict containing only the fields that are signed."""
+        from collections import OrderedDict
+
+        signable_fields = (
+            "tx_id",
+            "sender",
+            "recipient",
+            "file_name",
+            "alias",
+            "recipient_alias",
+            "is_sensitive",
+        )
+        return OrderedDict((field, transaction_dict.get(field, "")) for field in signable_fields)
+
     def add_transaction(self,
                         tx_id,
                         sender,
@@ -180,6 +213,7 @@ class Blockchain:
                         signature,
                         is_sensitive="0",
                         file_owner=None):
+                        is_sensitive="0"):
         # Ignore if transaction already in chain
         if self.transaction_exists(tx_id):
             logging.info(f"Transaction {tx_id} already known. Duplicate ignored.")
@@ -188,6 +222,8 @@ class Blockchain:
         # Build transaction dictionary
         from collections import OrderedDict
         base_tr = OrderedDict({
+        from collections import OrderedDict
+        tr = OrderedDict({
             "tx_id":           tx_id,
             "sender":          sender,
             "recipient":       recipient,
@@ -211,6 +247,12 @@ class Blockchain:
             except Exception:
                 owner_netloc = file_owner
             tr["file_owner"] = owner_netloc
+
+        self.transactions.append(tr)
+            signable = self._build_signable_transaction(tr)
+            if not self.verify_signature(sender, signature, signable):
+                logging.error("Signature invalid!")
+                return False
 
         self.transactions.append(tr)
 
@@ -583,6 +625,38 @@ def node_upload():
     upfile.save(local_abs)
 
     file_owner = normalize_netloc(request.host)
+    if not file_name:
+        return jsonify({"error":"Missing file_name in form data"}), 400
+
+    provided_path = request.form.get('file_path', '')
+    if provided_path and not _is_safe_subpath(provided_path, PENDING_FOLDER):
+        return jsonify({"error": "Invalid file_path supplied"}), 400
+
+    try:
+        safe_file_name = _ensure_safe_filename(file_name)
+    except ValueError:
+        return jsonify({"error": "Invalid file_name supplied"}), 400
+
+    pending_filename = f"{uuid4().hex}_{safe_file_name}"
+    pending_rel = os.path.join(PENDING_FOLDER, pending_filename)
+    pending_abs = os.path.abspath(pending_rel)
+    pending_root = os.path.abspath(PENDING_FOLDER)
+
+    if not pending_abs.startswith(os.path.join(pending_root, '')):
+        return jsonify({"error": "Failed to derive safe pending path"}), 400
+
+
+    enc_key_b64   = request.form.get('enc_key_b64','')
+    enc_nonce_b64 = request.form.get('enc_nonce_b64','')
+    enc_tag_b64   = request.form.get('enc_tag_b64','')
+
+    if is_sensitive == "1" and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
+        store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
+
+    os.makedirs(os.path.dirname(pending_abs), exist_ok=True)
+    upfile.save(pending_abs)
+
+    canonical_file_path = os.path.join(PENDING_FOLDER, pending_filename)
 
     idx = blockchain.add_transaction(
         tx_id           = tx_id,
@@ -600,6 +674,17 @@ def node_upload():
         return jsonify({"error":"Invalid signature"}), 400
 
     return jsonify({"message":f"File received, block = {idx}"}), 201
+        file_name       = safe_file_name,
+        file_path       = canonical_file_path,
+        alias           = alias,
+        recipient_alias = recipient_alias,
+        signature       = signature,
+        is_sensitive    = is_sensitive
+    )
+    if not idx:
+        return jsonify({"error":"Invalid signature"}), 400
+
+    return jsonify({"message":f"File received, block = {idx}"}), 201
 @app.route('/transactions/new', methods=['POST'])
 def new_transaction():
     data = request.get_json() or {}
@@ -611,6 +696,15 @@ def new_transaction():
     needed = ["tx_id","sender","recipient","file_name","file_path","signature"]
     if not all(k in data for k in needed):
         return "Missing values",400
+
+    try:
+        data['file_name'] = _ensure_safe_filename(data['file_name'])
+    except ValueError:
+        return "Invalid file_name", 400
+
+    file_path_value = data['file_path']
+    if not (_is_safe_subpath(file_path_value, PENDING_FOLDER) or _is_safe_subpath(file_path_value, UPLOAD_FOLDER)):
+        return "Invalid file_path", 400
 
     idx = blockchain.add_transaction(
         tx_id           = data["tx_id"],
@@ -630,6 +724,20 @@ def new_transaction():
     stored_tx = blockchain.get_transaction_by_id(data["tx_id"])
     if stored_tx and stored_tx.get("file_owner"):
         data['file_owner'] = stored_tx['file_owner']
+
+    if idx and not skip_broadcast:
+        blockchain.broadcast_new_transaction(data)
+
+    return jsonify({"message": f"Transaction will be added to block {idx}"}),201
+        file_name       = data['file_name'],
+        file_path       = data['file_path'],
+        alias           = data.get('alias',''),
+        recipient_alias = data.get('recipient_alias',''),
+        signature       = data['signature'],
+        is_sensitive    = data.get('is_sensitive','0')
+    )
+    if not idx:
+        return "Invalid signature",400
 
     if idx and not skip_broadcast:
         blockchain.broadcast_new_transaction(data)
