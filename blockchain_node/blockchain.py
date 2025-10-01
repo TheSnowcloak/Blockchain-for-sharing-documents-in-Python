@@ -1225,34 +1225,19 @@ def auto_sync_conflicts(interval=10):
             logging.info("Chain replaced.")
         else:
             logging.info("Chain is authoritative.")
-    rm = d['node'].strip()
-    rem = blockchain.remove_trusted_node(rm)
-    if rem:
-        return jsonify({"message": f"Trusted node {rm} removed"}),200
-    return jsonify({"message":"Trusted node not found"}),404
 
 @app.route('/trusted_nodes/get', methods=['GET'])
 def get_trusted_nodes():
+    with blockchain.lock:
+        trusted_snapshot = list(blockchain.trusted_nodes)
     return jsonify({
-        "trusted_nodes": list(blockchain.trusted_nodes)
+        "trusted_nodes": trusted_snapshot
     }),200
-
-@app.route('/nodes/resolve', methods=['GET'])
-def consensus():
-    replaced = blockchain.resolve_conflicts()
-    if replaced:
-        return jsonify({"message":"Chain replaced"}),200
-    return jsonify({"message":"Chain is authoritative"}),200
 
 @app.route('/sync/failures', methods=['GET'])
 def sync_failures():
     limit = request.args.get('limit', type=int)
     return jsonify({"failures": blockchain.get_sync_failures(limit=limit)}), 200
-
-@app.route('/sync', methods=['GET'])
-def manual_sync():
-    blockchain.sync_files()
-    return jsonify({"message":"sync done"}),200
 @app.route('/trusted_nodes/keys', methods=['GET'])
 def get_trusted_node_keys():
     if not _request_from_trusted():
@@ -1334,31 +1319,6 @@ def approve_block(block_index):
 
     status_code = 404 if result == "Block not found" else 400
     return jsonify({"message": result}), status_code
-
-@app.route('/nodes/resolve', methods=['GET'])
-def consensus():
-    replaced = blockchain.resolve_conflicts()
-    if replaced:
-        return jsonify({"message":"Chain replaced"}),200
-    return jsonify({"message":"Chain is authoritative"}),200
-
-@app.route('/sync', methods=['GET'])
-def manual_sync():
-    blockchain.sync_files()
-    return jsonify({"message":"sync done"}),200
-
-def auto_sync_conflicts(interval=10):
-    """
-    Periodically calls resolve_conflicts() in a background thread.
-    Default interval = 10s. Adjust as needed.
-    """
-    while True:
-        time.sleep(interval)
-        replaced = blockchain.resolve_conflicts()
-        if replaced:
-            logging.info("Chain replaced.")
-        else:
-            logging.info("Chain is authoritative.")
 
 if __name__ == "__main__":
     t = threading.Thread(target=auto_sync_conflicts, args=(10,), daemon=True)
