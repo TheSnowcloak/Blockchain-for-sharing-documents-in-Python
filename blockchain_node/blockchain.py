@@ -120,15 +120,17 @@ def get_encryption_keys(tx_id):
     db = load_keys_db()
     return db.get(tx_id)
 
+
 ###################################
 # Blockchain class
 ###################################
 class Blockchain:
     def __init__(self):
+        self._lock = threading.RLock()
         self.transactions = []
         self.chain = []
-        self.nodes = set()           # "ip:port" for untrusted
-        self.trusted_nodes = set()   # "ip:port" for trusted
+        self.nodes = set()
+        self.trusted_nodes = set()
         self.sync_chain_timeout = SYNC_CHAIN_TIMEOUT
         self.sync_download_timeout = SYNC_DOWNLOAD_TIMEOUT
         self.sync_max_retries = max(1, SYNC_MAX_RETRIES)
@@ -141,27 +143,6 @@ class Blockchain:
         self._deferred_retry_lock = threading.Lock()
         self._pending_deferred_retries = {}
 
-        if os.path.exists(DATA_FILE):
-            self.load_data()
-            if len(self.chain) == 0:
-                self.create_block(proof=100, previous_hash='1')
-    def __init__(self):
-        self._lock = threading.RLock()
-        self.transactions = []
-        self.chain = []
-        self.nodes = set()           # "ip:port" for untrusted
-        self.trusted_nodes = set()   # "ip:port" for trusted
-
-        if os.path.exists(DATA_FILE):
-            self.load_data()
-            if len(self.chain) == 0:
-                self.create_block(proof=100, previous_hash='1')
-class Blockchain:
-    def __init__(self):
-        self.transactions = []
-        self.chain = []
-        self.nodes = set()           # "ip:port" for untrusted
-        self.trusted_nodes = set()   # "ip:port" for trusted
         self.validator_public_keys = {}
         self.quorum_threshold = 1
         self.validator_id = None
@@ -179,125 +160,80 @@ class Blockchain:
             self.create_block(proof=100, previous_hash='1', system_override=True)
             self.save_data()
 
-        # Example: add "11.222.33.44:5555" to trusted nodes, You can uncomment 2 lines bellow to add a node to trusted nodes.
-        #self.trusted_nodes.add("11.222.33.44:5555")
-        #self.save_data()
-        #self.trusted_nodes.add("127.0.0.1:5000")
-        #self.save_data()
-
     @property
     def lock(self):
         return self._lock
 
     def transaction_exists(self, tx_id):
         with self._lock:
-            for t in self.transactions:
-                if t.get("tx_id") == tx_id:
+            for transaction in self.transactions:
+                if transaction.get("tx_id") == tx_id:
                     return True
             for block in self.chain:
-                for t in block["transactions"]:
-                    if t.get("tx_id") == tx_id:
+                for transaction in block.get("transactions", []):
+                    if transaction.get("tx_id") == tx_id:
                         return True
         return False
 
-    def create_block(self, proof, previous_hash):
+    def get_transaction_by_id(self, tx_id):
         with self._lock:
-            # Move files from pending_uploads to uploads upon block creation
+            for transaction in self.transactions:
+                if transaction.get("tx_id") == tx_id:
+                    return dict(transaction)
+            for block in self.chain:
+                for transaction in block.get("transactions", []):
+                    if transaction.get("tx_id") == tx_id:
+                        return dict(transaction)
+        return None
+
+    def create_block(self, proof, previous_hash, system_override=False):
+        with self._lock:
             for tx in self.transactions:
-                fp = tx.get("file_path")
-                if fp and fp.startswith("./pending_uploads/"):
-                    old_abs = os.path.join(".", fp)
+                file_path = tx.get("file_path")
+                if not file_path:
+                    continue
+
+                target_path = file_path
+                if file_path.startswith("./pending_uploads/"):
+                    target_path = file_path.replace("pending_uploads", "uploads", 1)
+                    old_abs = os.path.join(".", file_path)
+                    new_abs = os.path.join(".", target_path)
                     if os.path.exists(old_abs):
-                        new_path = fp.replace("pending_uploads", "uploads", 1)
-                        new_abs  = os.path.join(".", new_path)
                         os.makedirs(os.path.dirname(new_abs), exist_ok=True)
                         os.rename(old_abs, new_abs)
-                        tx["file_path"] = new_path
+                elif not file_path.startswith("./uploads/"):
+                    target_path = os.path.join("./uploads", os.path.basename(file_path))
+
+                tx["file_path"] = target_path
+
+            if not system_override and not self.is_authorized_validator():
+                raise PermissionError("This node is not authorized to propose blocks.")
 
             block = {
-                "index":        len(self.chain) + 1,
-                "timestamp":    str(datetime.datetime.now()),
-                "transactions": self.transactions,
-                "proof":        proof,
-                "previous_hash": previous_hash
+                "index": len(self.chain) + 1,
+                "timestamp": str(datetime.datetime.now()),
+                "transactions": list(self.transactions),
+                "proof": proof,
+                "previous_hash": previous_hash,
             }
+
+            if system_override:
+                block["validator_id"] = self.validator_id or "GENESIS"
+                block["validator_signatures"] = []
+            else:
+                block["validator_id"] = self.validator_id
+                signature_hex = self._sign_block(block)
+                block["validator_signatures"] = [{
+                    "validator_id": self.validator_id,
+                    "signature": signature_hex,
+                }]
+
             self.chain.append(block)
             self.transactions = []
             self.save_data()
             return block
-    def transaction_exists(self, tx_id):
-        for t in self.transactions:
-            if t.get("tx_id") == tx_id:
-                return True
-        for block in self.chain:
-            for t in block["transactions"]:
-                if t.get("tx_id") == tx_id:
-                    return True
-        return False
-
-    def create_block(self, proof, previous_hash, system_override=False):
-    def get_transaction_by_id(self, tx_id):
-        for t in self.transactions:
-            if t.get("tx_id") == tx_id:
-                return t
-        for block in self.chain:
-            for t in block["transactions"]:
-                if t.get("tx_id") == tx_id:
-                    return t
-        return None
-
-    def create_block(self, proof, previous_hash):
-        # Move files from pending_uploads to uploads upon block creation
-        for tx in self.transactions:
-            fp = tx.get("file_path")
-            if not fp:
-                continue
-
-            target_path = fp
-            if fp.startswith("./pending_uploads/"):
-                target_path = fp.replace("pending_uploads", "uploads", 1)
-                old_abs = os.path.join(".", fp)
-                new_abs = os.path.join(".", target_path)
-                if os.path.exists(old_abs):
-                    os.makedirs(os.path.dirname(new_abs), exist_ok=True)
-                    os.rename(old_abs, new_abs)
-            elif not fp.startswith("./uploads/"):
-                # Normalize any unexpected value to uploads/<basename>
-                target_path = os.path.join("./uploads", os.path.basename(fp))
-
-            tx["file_path"] = target_path
-
-        if not system_override and not self.is_authorized_validator():
-            raise PermissionError("This node is not authorized to propose blocks.")
-
-        block = {
-            "index":        len(self.chain) + 1,
-            "timestamp":    str(datetime.datetime.now()),
-            "transactions": self.transactions,
-            "proof":        proof,
-            "previous_hash": previous_hash
-        }
-
-        if system_override:
-            block["validator_id"] = self.validator_id or "GENESIS"
-            block["validator_signatures"] = []
-        else:
-            block["validator_id"] = self.validator_id
-            signature_hex = self._sign_block(block)
-            block["validator_signatures"] = [{
-                "validator_id": self.validator_id,
-                "signature": signature_hex
-            }]
-
-        self.chain.append(block)
-        self.transactions = []
-        self.save_data()
-        return block
 
     def _build_signable_transaction(self, transaction_dict):
-        """Return an OrderedDict containing only the fields that are signed."""
-        from collections import OrderedDict
-
         signable_fields = (
             "tx_id",
             "sender",
@@ -309,148 +245,96 @@ class Blockchain:
         )
         return OrderedDict((field, transaction_dict.get(field, "")) for field in signable_fields)
 
-    def add_transaction(self,
-                        tx_id,
-                        sender,
-                        recipient,
-                        file_name,
-                        file_path,
-                        alias,
-                        recipient_alias,
-                        signature,
-                        is_sensitive="0",
-                        file_owner=None):
-                        is_sensitive="0"):
+    def add_transaction(
+        self,
+        tx_id,
+        sender,
+        recipient,
+        file_name,
+        file_path,
+        alias,
+        recipient_alias,
+        signature,
+        is_sensitive="0",
+        file_owner=None,
+    ):
         with self._lock:
-            # Ignore if transaction already in chain
             if self.transaction_exists(tx_id):
                 logging.info(f"Transaction {tx_id} already known. Duplicate ignored.")
-                return self.last_block['index']
+                return self.last_block["index"]
 
-            # Build transaction dictionary
-            from collections import OrderedDict
-            tr = OrderedDict({
-                "tx_id":           tx_id,
-                "sender":          sender,
-                "recipient":       recipient,
-                "file_name":       file_name,
-                "file_path":       file_path,
-                "alias":           alias,
+            transaction = OrderedDict({
+                "tx_id": tx_id,
+                "sender": sender,
+                "recipient": recipient,
+                "file_name": file_name,
+                "file_path": file_path,
+                "alias": alias,
                 "recipient_alias": recipient_alias,
-                "is_sensitive":    is_sensitive
+                "is_sensitive": is_sensitive,
             })
 
-            # If not a mining reward, verify signature
             if sender != MINING_SENDER:
-                if not self.verify_signature(sender, signature, tr):
+                signable = self._build_signable_transaction(transaction)
+                if not self.verify_signature(sender, signature, signable):
                     logging.error("Signature invalid!")
                     return False
 
-            self.transactions.append(tr)
+            if file_owner:
+                try:
+                    transaction["file_owner"] = normalize_netloc(file_owner)
+                except Exception:
+                    transaction["file_owner"] = file_owner
 
-            # Auto-mine if transaction queue >= 5
+            self.transactions.append(transaction)
+
             if len(self.transactions) >= 5:
                 logging.info("Reached 5 pending TX. Auto-mining new block.")
                 last_block = self.last_block
-                prev_hash  = self.hash(last_block)
-                self.create_block(proof=100, previous_hash=prev_hash)
+                prev_hash = self.hash(last_block)
+                try:
+                    self.create_block(proof=100, previous_hash=prev_hash)
+                except PermissionError as exc:
+                    logging.error(f"Auto-mining skipped: {exc}")
 
-            return self.last_block['index']
-        # Ignore if transaction already in chain
-        if self.transaction_exists(tx_id):
-            logging.info(f"Transaction {tx_id} already known. Duplicate ignored.")
-            return self.last_block['index']
-
-        # Build transaction dictionary
-        from collections import OrderedDict
-        base_tr = OrderedDict({
-        from collections import OrderedDict
-        tr = OrderedDict({
-            "tx_id":           tx_id,
-            "sender":          sender,
-            "recipient":       recipient,
-            "file_name":       file_name,
-            "file_path":       file_path,
-            "alias":           alias,
-            "recipient_alias": recipient_alias,
-            "is_sensitive":    is_sensitive
-        })
-
-        # If not a mining reward, verify signature
-        if sender != MINING_SENDER:
-            if not self.verify_signature(sender, signature, base_tr):
-                logging.error("Signature invalid!")
-                return False
-
-        tr = OrderedDict(base_tr)
-        if file_owner:
-            try:
-                owner_netloc = normalize_netloc(file_owner)
-            except Exception:
-                owner_netloc = file_owner
-            tr["file_owner"] = owner_netloc
-
-        self.transactions.append(tr)
-            signable = self._build_signable_transaction(tr)
-            if not self.verify_signature(sender, signature, signable):
-                logging.error("Signature invalid!")
-                return False
-
-        self.transactions.append(tr)
-
-        # Auto-mine if transaction queue >= 5
-        if len(self.transactions) >= 5:
-            logging.info("Reached 5 pending TX. Auto-mining new block.")
-            last_block = self.last_block
-            prev_hash  = self.hash(last_block)
-            try:
-                self.create_block(proof=100, previous_hash=prev_hash)
-            except PermissionError as exc:
-                logging.error(f"Auto-mining skipped: {exc}")
-
-        return self.last_block['index']
+            return self.last_block["index"]
 
     def verify_signature(self, sender_pub_hex, signature_hex, transaction):
-        """
-        Verifies the signature of the transaction using the sender's public key.
-        """
-        import json
         try:
-            s = json.dumps(transaction, sort_keys=True)
+            payload = json.dumps(transaction, sort_keys=True)
             pub_key = RSA.importKey(binascii.unhexlify(sender_pub_hex))
             verifier = pkcs1_15.new(pub_key)
-            h = SHA256.new(s.encode('utf-8'))
-            verifier.verify(h, binascii.unhexlify(signature_hex))
+            digest = SHA256.new(payload.encode("utf-8"))
+            verifier.verify(digest, binascii.unhexlify(signature_hex))
             return True
-        except (ValueError, TypeError, binascii.Error) as e:
-            logging.error(f"Signature verify error: {e}")
+        except (ValueError, TypeError, binascii.Error) as exc:
+            logging.error(f"Signature verify error: {exc}")
             return False
 
     @property
     def last_block(self):
         with self._lock:
+            if not self.chain:
+                raise ValueError("Blockchain is empty")
             return self.chain[-1]
 
     @staticmethod
     def hash(block):
-        import json
-        s = json.dumps(block, sort_keys=True).encode()
-        from Crypto.Hash import SHA256
-        return SHA256.new(s).hexdigest()
+        payload = json.dumps(block, sort_keys=True).encode()
+        return SHA256.new(payload).hexdigest()
 
     def valid_chain(self, chain):
-        """
-        Simple chain validity check: ensure each block's previous_hash matches
-        the hash of the previous block.
-        """
+        if not chain:
+            return False
         last_block = chain[0]
-        idx = 1
-        while idx < len(chain):
-            block = chain[idx]
-            if block['previous_hash'] != self.hash(last_block):
+        if not self.verify_block_signatures(last_block):
+            return False
+        for block in chain[1:]:
+            if block.get("previous_hash") != self.hash(last_block):
+                return False
+            if not self.verify_block_signatures(block):
                 return False
             last_block = block
-            idx += 1
         return True
 
     def _record_sync_failure(self, operation, netloc, filename=None, error=None, attempt=None, stage="immediate"):
@@ -478,15 +362,14 @@ class Blockchain:
             try:
                 response = requests.get(url, timeout=self.sync_chain_timeout)
                 if response.status_code == 200:
-                    return response.json().get('chain', [])
+                    return response.json().get("chain", [])
                 self._record_sync_failure("chain", netloc, error=f"HTTP {response.status_code}", attempt=attempt)
             except requests.exceptions.RequestException as exc:
                 self._record_sync_failure("chain", netloc, error=exc, attempt=attempt)
-            if attempt < self.sync_max_retries:
-                sleep_for = delay if delay > 0 else 0
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
-                delay = delay * self.sync_backoff_multiplier if self.sync_backoff_multiplier > 1 else delay
+            if attempt < self.sync_max_retries and delay > 0:
+                time.sleep(delay)
+                if self.sync_backoff_multiplier > 1:
+                    delay *= self.sync_backoff_multiplier
         return None
 
     def _download_file_with_retry(self, netloc, tx, local_abs, stage="immediate", attempt_offset=0):
@@ -500,7 +383,7 @@ class Blockchain:
                 response = requests.get(url, stream=True, timeout=self.sync_download_timeout)
                 if response.status_code == 200:
                     os.makedirs(os.path.dirname(local_abs), exist_ok=True)
-                    with open(local_abs, 'wb') as f:
+                    with open(local_abs, "wb") as f:
                         for chunk in response.iter_content(4096):
                             f.write(chunk)
                     return True
@@ -521,17 +404,15 @@ class Blockchain:
                     attempt=attempt + attempt_offset,
                     stage=stage,
                 )
-            if attempt < self.sync_max_retries:
-                sleep_for = delay if delay > 0 else 0
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
-                delay = delay * self.sync_backoff_multiplier if self.sync_backoff_multiplier > 1 else delay
+            if attempt < self.sync_max_retries and delay > 0:
+                time.sleep(delay)
+                if self.sync_backoff_multiplier > 1:
+                    delay *= self.sync_backoff_multiplier
         return False
 
     def _clear_deferred_retry(self, key):
         with self._deferred_retry_lock:
-            if key in self._pending_deferred_retries:
-                del self._pending_deferred_retries[key]
+            self._pending_deferred_retries.pop(key, None)
 
     def _schedule_deferred_retry(self, netloc, tx, attempt):
         if self.deferred_retry_limit == 0 or attempt > self.deferred_retry_limit:
@@ -546,7 +427,10 @@ class Blockchain:
                 return
             self._pending_deferred_retries[key] = attempt
 
-        delay = self.deferred_retry_delay * (self.sync_backoff_multiplier ** (attempt - 1)) if self.deferred_retry_delay > 0 else 0
+        if self.deferred_retry_delay > 0:
+            delay = self.deferred_retry_delay * (self.sync_backoff_multiplier ** (attempt - 1))
+        else:
+            delay = 0
         logging.info(f"Scheduling deferred retry #{attempt} for {file_path} from {netloc} in {delay:.2f}s")
         timer = threading.Timer(delay, self._deferred_retry_worker, args=(netloc, dict(tx), attempt))
         timer.daemon = True
@@ -588,6 +472,34 @@ class Blockchain:
         return [dict(item) for item in records]
 
     def resolve_conflicts(self):
+        replaced = False
+        with self._lock:
+            current_length = len(self.chain)
+            trusted_nodes = list(self.trusted_nodes)
+            untrusted_nodes = [n for n in self.nodes if n not in self.trusted_nodes]
+        best_chain = None
+        best_length = current_length
+
+        for netloc in trusted_nodes:
+            chain_data = self._fetch_chain_with_retry(netloc)
+            if chain_data and len(chain_data) > best_length and self.valid_chain(chain_data):
+                best_chain = chain_data
+                best_length = len(chain_data)
+
+        if best_chain is None:
+            for netloc in untrusted_nodes:
+                chain_data = self._fetch_chain_with_retry(netloc)
+                if chain_data and len(chain_data) > best_length and self.valid_chain(chain_data):
+                    best_chain = chain_data
+                    best_length = len(chain_data)
+
+        if best_chain is not None:
+            with self._lock:
+                self.chain = best_chain
+                self.save_data()
+            self.sync_files()
+            replaced = True
+        return replaced
 
     @staticmethod
     def derive_public_key_hex(private_key_hex):
@@ -616,7 +528,6 @@ class Blockchain:
 
     def verify_block_signatures(self, block):
         if block.get("index") == 1 and not block.get("validator_signatures"):
-            # Allow unsigned legacy genesis blocks for backward compatibility
             return True
 
         signatures = block.get("validator_signatures", [])
@@ -627,12 +538,10 @@ class Blockchain:
         seen_validators = set()
         valid_count = 0
 
-        for sig_entry in signatures:
-            validator_id = sig_entry.get("validator_id")
-            signature_hex = sig_entry.get("signature")
-            if not validator_id or not signature_hex:
-                continue
-            if validator_id in seen_validators:
+        for signature_entry in signatures:
+            validator_id = signature_entry.get("validator_id")
+            signature_hex = signature_entry.get("signature")
+            if not validator_id or not signature_hex or validator_id in seen_validators:
                 continue
 
             pub_hex = self.validator_public_keys.get(validator_id)
@@ -643,8 +552,7 @@ class Blockchain:
             try:
                 pub_key = RSA.importKey(binascii.unhexlify(pub_hex))
                 verifier = pkcs1_15.new(pub_key)
-                verifier.verify(SHA256.new(payload.encode('utf-8')),
-                                binascii.unhexlify(signature_hex))
+                verifier.verify(SHA256.new(payload.encode('utf-8')), binascii.unhexlify(signature_hex))
                 seen_validators.add(validator_id)
                 valid_count += 1
             except (ValueError, TypeError, binascii.Error) as exc:
@@ -652,14 +560,12 @@ class Blockchain:
 
         required = max(1, int(self.quorum_threshold))
         if valid_count < required:
-            logging.warning(
-                f"Block {block.get('index')} signature quorum not satisfied: {valid_count}/{required}")
+            logging.warning(f"Block {block.get('index')} signature quorum not satisfied: {valid_count}/{required}")
             return False
 
         block_proposer = block.get("validator_id")
         if block_proposer and block_proposer not in seen_validators:
-            logging.warning(
-                f"Block proposer {block_proposer} is not among valid signatures for block {block.get('index')}")
+            logging.warning(f"Block proposer {block_proposer} is not among valid signatures for block {block.get('index')}")
             return False
 
         return True
@@ -667,18 +573,15 @@ class Blockchain:
     def is_authorized_validator(self):
         if not self.validator_id or not self.validator_private_key_hex:
             return False
-
         try:
-            local_public = self.validator_public_key_hex or self.derive_public_key_hex(
-                self.validator_private_key_hex)
+            local_public = self.validator_public_key_hex or self.derive_public_key_hex(self.validator_private_key_hex)
         except (ValueError, TypeError, binascii.Error) as exc:
             logging.error(f"Failed to derive validator public key: {exc}")
             return False
 
         registry_public = self.validator_public_keys.get(self.validator_id)
         if registry_public and registry_public != local_public:
-            logging.error(
-                "Local validator public key does not match registered key. Rotate or update keys before mining.")
+            logging.error("Local validator public key does not match registered key. Rotate or update keys before mining.")
             return False
 
         if self.validator_netloc and normalize_netloc(self.validator_netloc) not in self.trusted_nodes:
@@ -738,247 +641,61 @@ class Blockchain:
         try:
             pub_key = RSA.importKey(binascii.unhexlify(pub_hex))
             verifier = pkcs1_15.new(pub_key)
-            verifier.verify(SHA256.new(payload.encode('utf-8')),
-                            binascii.unhexlify(signature_hex))
+            verifier.verify(SHA256.new(payload.encode('utf-8')), binascii.unhexlify(signature_hex))
         except (ValueError, TypeError, binascii.Error) as exc:
             return False, f"Invalid signature: {exc}"
 
         signatures.append({
             "validator_id": validator_id,
-            "signature": signature_hex
+            "signature": signature_hex,
         })
         self.save_data()
         return True, block
 
-    def valid_chain(self, chain):
-        """
-        Simple chain validity check: ensure each block's previous_hash matches
-        the hash of the previous block.
-        """
-        last_block = chain[0]
-        if not self.verify_block_signatures(last_block):
-            return False
-
-        idx = 1
-        while idx < len(chain):
-            block = chain[idx]
-            if block['previous_hash'] != self.hash(last_block):
-                return False
-            if not self.verify_block_signatures(block):
-                return False
-            last_block = block
-            idx += 1
-        return True
-
-    def resolve_conflicts(self):
-        """
-        Consensus mechanism: tries to fetch chain from trusted_nodes first,
-        if no longer chain found, tries untrusted nodes.
-        If a longer valid chain is found, we adopt it, then call sync_files.
-        """
-        replaced = False
-        with self._lock:
-            length_here = len(self.chain)
-            trusted_nodes = list(self.trusted_nodes)
-            untrusted_nodes = list(self.nodes - self.trusted_nodes)
-        new_chain = None
-
-        # 1) Check trusted nodes
-        for netloc in trusted_nodes:
-            try:
-                url = f"http://{netloc}/chain"
-                r   = requests.get(url, timeout=4)
-                if r.status_code == 200:
-                    data = r.json()
-                    chain_len  = data['length']
-                    chain_data = data['chain']
-                    if chain_len > length_here and self.valid_chain(chain_data):
-                        length_here = chain_len
-                        new_chain   = chain_data
-            except requests.exceptions.RequestException:
-                pass
-
-        # 2) Then check untrusted if no better chain found
-        if not new_chain:
-            for netloc in untrusted_nodes:
-                try:
-                    url = f"http://{netloc}/chain"
-                    r   = requests.get(url, timeout=4)
-                    if r.status_code == 200:
-                        data = r.json()
-                        chain_len  = data['length']
-                        chain_data = data['chain']
-                        if chain_len > length_here and self.valid_chain(chain_data):
-                            length_here = chain_len
-                            new_chain   = chain_data
-                except requests.exceptions.RequestException:
-                    pass
-
-        # If found a new chain, adopt it and sync files
-        if new_chain:
-            with self._lock:
-                self.chain = new_chain
-                self.save_data()
-                replaced = True
-            self.sync_files()
-        return replaced
-
     def sync_files(self):
-        """
-        For each node (trusted or not), retrieve /chain. For each transaction:
-        if is_sensitive=1 and the node is not in self.trusted_nodes => skip.
-        Otherwise, try to download the file from /file/<filename>.
-        """
         with self._lock:
             trusted_snapshot = set(self.trusted_nodes)
-            all_netlocs = list(self.nodes.union(self.trusted_nodes))
-        for netloc in all_netlocs:
-            try:
-                url = f"http://{netloc}/chain"
-                r   = requests.get(url, timeout=4)
-                if r.status_code == 200:
-                except requests.exceptions.RequestException:
-                    pass
-
-        # If found a new chain, adopt it and sync files
-        if new_chain:
-            self.chain = new_chain
-            self.sync_files()
-            self.save_data()
-            replaced = True
-        return replaced
-
-    def sync_files(self):
-        """
-        For each node (trusted or not), retrieve /chain. For each transaction:
-        if is_sensitive=1 and the node is not in self.trusted_nodes => skip.
-        Otherwise, try to download the file from /file/<filename>.
-        """
-        all_netlocs = self.nodes.union(self.trusted_nodes)
-        for netloc in all_netlocs:
+            all_nodes = list(self.nodes.union(self.trusted_nodes))
+        for netloc in all_nodes:
             chain_data = self._fetch_chain_with_retry(netloc)
             if not chain_data:
                 continue
             for block in chain_data:
-                for tx in block.get('transactions', []):
-                    if tx.get("is_sensitive", "0") == "1" and netloc not in self.trusted_nodes:
+                for tx in block.get("transactions", []):
+                    if tx.get("is_sensitive", "0") == "1" and netloc not in trusted_snapshot:
                         continue
-                    fp = tx.get("file_path", "")
-                    if not fp or not fp.startswith("./uploads/"):
+                    file_path = tx.get("file_path", "")
+                    if not file_path or not file_path.startswith("./uploads/"):
                         continue
-                    local_abs = os.path.join(".", fp)
-                    key = (netloc, fp)
+                    local_abs = os.path.join(".", file_path)
+                    key = (netloc, file_path)
                     if os.path.exists(local_abs):
                         self._clear_deferred_retry(key)
                         continue
                     success = self._download_file_with_retry(netloc, tx, local_abs)
                     if success:
                         self._clear_deferred_retry(key)
-                        continue
-                    self._schedule_deferred_retry(netloc, tx, attempt=1)
-    def sync_files(self):
-        """
-        For each node (trusted or not), retrieve /chain. For each transaction:
-        if is_sensitive=1 and the node is not in self.trusted_nodes => skip.
-        Otherwise, try to download the file from /file/<filename>.
-        """
-        all_netlocs = self.nodes.union(self.trusted_nodes)
-        ordered_netlocs = list(all_netlocs)
-        for netloc in all_netlocs:
-            try:
-                url = f"http://{netloc}/chain"
-                r   = requests.get(url, timeout=4)
-                if r.status_code == 200:
-                    cdata = r.json().get('chain', [])
-                    for block in cdata:
-                        for tx in block['transactions']:
-                            if tx.get("is_sensitive","0") == "1" and netloc not in trusted_snapshot:
-                                continue
-                            fp = tx.get("file_path", "")
-                            if fp and fp.startswith("./uploads/"):
-                                local_abs = os.path.join(".", fp)
-                                if not os.path.exists(local_abs):
-                                    fn = tx["file_name"]
-                                    downurl = f"http://{netloc}/file/{fn}"
-                                    try:
-                                        fresp = requests.get(downurl, stream=True, timeout=4)
-                                        if fresp.status_code == 200:
-                                            os.makedirs(os.path.dirname(local_abs), exist_ok=True)
-                                            with open(local_abs, 'wb') as f:
-                                                for chunk in fresp.iter_content(4096):
-                                                    f.write(chunk)
-                                    except requests.exceptions.RequestException:
-                                        pass
-            except requests.exceptions.RequestException:
-                pass
+                    else:
+                        self._schedule_deferred_retry(netloc, tx, attempt=1)
 
     def broadcast_new_transaction(self, tx_dict):
-        """
-        If transaction is sensitive => only broadcast to trusted_nodes,
-        else broadcast to everyone.
-        """
         with self._lock:
-            if tx_dict.get("is_sensitive","0") == "1":
+            if tx_dict.get("is_sensitive", "0") == "1":
                 targets = list(self.trusted_nodes)
-                logging.info("Broadcast CITLIVÉ => only to trusted nodes.")
             else:
                 targets = list(self.nodes.union(self.trusted_nodes))
 
-        for netloc in targets:
-            try:
-                url = f"http://{netloc}/transactions/new"
-                data = dict(tx_dict)
-                                    candidates = []
-
-                                    def add_candidate(host):
-                                        if not host:
-                                            return
-                                    
-                                        normalized = normalize_netloc(host)
-                                        if normalized not in candidates:
-                                            candidates.append(normalized)
-
-                                    add_candidate(netloc)
-                                    add_candidate(tx.get("file_owner"))
-                                    for other in ordered_netlocs:
-                                        add_candidate(other)
-
-                                    for host in candidates:
-                                        if tx.get("is_sensitive", "0") == "1" and host not in self.trusted_nodes:
-                                            continue
-                                        downurl = f"http://{host}/file/{fn}"
-                                        try:
-                                            fresp = requests.get(downurl, stream=True, timeout=4)
-                                            if fresp.status_code == 200:
-                                                os.makedirs(os.path.dirname(local_abs), exist_ok=True)
-                                                with open(local_abs, 'wb') as f:
-                                                    for chunk in fresp.iter_content(4096):
-                                                        f.write(chunk)
-                                                break
-                                        except requests.exceptions.RequestException:
-                                            continue
-            except requests.exceptions.RequestException:
-                pass
-
-    def broadcast_new_transaction(self, tx_dict):
-        """
-        If transaction is sensitive => only broadcast to trusted_nodes,
-        else broadcast to everyone.
-        """
-        if tx_dict.get("is_sensitive","0") == "1":
-            targets = self.trusted_nodes
-            logging.info("Broadcast CITLIVÉ => only to trusted nodes.")
-        else:
-            targets = self.nodes.union(self.trusted_nodes)
+        if tx_dict.get("is_sensitive", "0") == "1":
+            logging.info("Broadcasting sensitive transaction only to trusted nodes.")
 
         for netloc in targets:
             try:
                 url = f"http://{netloc}/transactions/new"
-                data = dict(tx_dict)
-                data["skip_broadcast"] = True
-                requests.post(url, json=data, timeout=3)
-            except requests.exceptions.RequestException as e:
-                logging.warning(f"Broadcast to {netloc} failed: {e}")
+                payload = dict(tx_dict)
+                payload["skip_broadcast"] = True
+                requests.post(url, json=payload, timeout=3)
+            except requests.exceptions.RequestException as exc:
+                logging.warning(f"Broadcast to {netloc} failed: {exc}")
 
     def load_validator_identity(self):
         if not os.path.exists(VALIDATOR_IDENTITY_FILE):
@@ -1017,173 +734,65 @@ class Blockchain:
             logging.error(f"Failed to persist validator identity: {exc}")
 
     def save_data(self):
-        data = {
-            "chain":         self.chain,
-            "nodes":         list(self.nodes),
-            "trusted_nodes": list(self.trusted_nodes),
-            "transactions":  self.transactions,
-            "validator_public_keys": self.validator_public_keys,
-            "quorum_threshold": self.quorum_threshold
-        }
+        with self._lock:
+            data = {
+                "chain": self.chain,
+                "nodes": list(self.nodes),
+                "trusted_nodes": list(self.trusted_nodes),
+                "transactions": self.transactions,
+                "validator_public_keys": self.validator_public_keys,
+                "quorum_threshold": self.quorum_threshold,
+            }
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
         logging.info("Blockchain data saved.")
-    def broadcast_new_transaction(self, tx_dict):
-        """
-        If transaction is sensitive => only broadcast to trusted_nodes,
-        else broadcast to everyone.
-        """
-        if tx_dict.get("is_sensitive","0") == "1":
-            targets = self.trusted_nodes
-            logging.info("Broadcast CITLIVÉ => only to trusted nodes.")
-        else:
-            targets = self.nodes.union(self.trusted_nodes)
-
-        tx_payload = dict(tx_dict)
-        owner = tx_payload.get("file_owner")
-        if not owner and tx_dict.get("tx_id"):
-            existing_tx = self.get_transaction_by_id(tx_dict["tx_id"])
-            if existing_tx:
-                owner = existing_tx.get("file_owner")
-                if owner:
-                    tx_payload["file_owner"] = owner
-
-        for netloc in targets:
-            try:
-                url = f"http://{netloc}/transactions/new"
-                data = dict(tx_payload)
-                data["skip_broadcast"] = True
-                requests.post(url, json=data, timeout=3)
-            except requests.exceptions.RequestException as e:
-                logging.warning(f"Broadcast to {netloc} failed: {e}")
-
-    def save_data(self):
-        with self._lock:
-            data = {
-                "chain":         self.chain,
-                "nodes":         list(self.nodes),
-                "trusted_nodes": list(self.trusted_nodes),
-                "transactions":  self.transactions
-            }
-            with open(DATA_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
-            logging.info("Blockchain data saved.")
 
     def load_data(self):
-        """
-        Loads chain, nodes, and transactions from DATA_FILE.
-        Normalizes netloc for both self.nodes and self.trusted_nodes.
-        """
-        with self._lock:
-            if os.path.exists(DATA_FILE):
-                with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                    d = json.load(f)
-                new_nodes = set()
-                for item in d.get("nodes", []):
-                    new_nodes.add(normalize_netloc(item))
-                new_trusted = set()
-                for item in d.get("trusted_nodes", []):
-                    new_trusted.add(normalize_netloc(item))
-
-                self.chain         = d.get("chain", [])
-                self.nodes         = new_nodes
-                self.trusted_nodes = new_trusted
-                self.transactions  = d.get("transactions", [])
-            else:
+        if not os.path.exists(DATA_FILE):
+            with self._lock:
                 self.chain = []
                 self.nodes = set()
                 self.trusted_nodes = set()
                 self.transactions = []
+                self.validator_public_keys = {}
+                self.quorum_threshold = 1
+            return
+        with open(DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        with self._lock:
+            self.chain = data.get("chain", [])
+            self.transactions = data.get("transactions", [])
+            self.nodes = {normalize_netloc(item) for item in data.get("nodes", [])}
+            self.trusted_nodes = {normalize_netloc(item) for item in data.get("trusted_nodes", [])}
+            self.validator_public_keys = data.get("validator_public_keys", self.validator_public_keys)
+            self.quorum_threshold = data.get("quorum_threshold", self.quorum_threshold)
 
     def add_node(self, address):
-        """
-        Called by /nodes/register endpoint. Takes an address, normalizes it,
-        and adds it to self.nodes.
-        """
         with self._lock:
-            address = normalize_netloc(address)
-            self.nodes.add(address)
+            normalized = normalize_netloc(address)
+            self.nodes.add(normalized)
             self.save_data()
 
     def remove_node(self, address):
+        normalized = normalize_netloc(address)
         with self._lock:
-            address = normalize_netloc(address)
-            if address in self.nodes:
-                self.nodes.remove(address)
+            if normalized in self.nodes:
+                self.nodes.remove(normalized)
                 self.save_data()
                 return True
         return False
-        data = {
-            "chain":         self.chain,
-            "nodes":         list(self.nodes),
-            "trusted_nodes": list(self.trusted_nodes),
-            "transactions":  self.transactions
-        }
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-        logging.info("Blockchain data saved.")
-
-    def load_data(self):
-        """
-        Loads chain, nodes, and transactions from DATA_FILE.
-        Normalizes netloc for both self.nodes and self.trusted_nodes.
-        """
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                d = json.load(f)
-            new_nodes = set()
-            for item in d.get("nodes", []):
-                new_nodes.add(normalize_netloc(item))
-            new_trusted = set()
-            for item in d.get("trusted_nodes", []):
-                new_trusted.add(normalize_netloc(item))
-
-            self.chain         = d.get("chain", [])
-            self.nodes         = new_nodes
-            self.trusted_nodes = new_trusted
-            self.transactions  = d.get("transactions", [])
-            self.validator_public_keys = d.get("validator_public_keys", self.validator_public_keys)
-            self.quorum_threshold = d.get("quorum_threshold", self.quorum_threshold)
-        else:
-            self.chain = []
-            self.nodes = set()
-            self.trusted_nodes = set()
-            self.transactions = []
-            self.validator_public_keys = {}
-            self.quorum_threshold = 1
-
-    def add_node(self, address):
-        """
-        Called by /nodes/register endpoint. Takes an address, normalizes it,
-        and adds it to self.nodes.
-        """
-        address = normalize_netloc(address)
-        self.nodes.add(address)
-        self.save_data()
-
-    def remove_node(self, address):
-        address = normalize_netloc(address)
-        if address in self.nodes:
-            self.nodes.remove(address)
-            self.save_data()
-            return True
-        return False
 
     def add_trusted_node(self, address):
-        """
-        Called by /trusted_nodes/register endpoint. Takes an address, normalizes it,
-        and adds it to self.trusted_nodes.
-        """
         with self._lock:
-            address = normalize_netloc(address)
-            self.trusted_nodes.add(address)
+            normalized = normalize_netloc(address)
+            self.trusted_nodes.add(normalized)
             self.save_data()
 
     def remove_trusted_node(self, address):
+        normalized = normalize_netloc(address)
         with self._lock:
-            address = normalize_netloc(address)
-            if address in self.trusted_nodes:
-                self.trusted_nodes.remove(address)
+            if normalized in self.trusted_nodes:
+                self.trusted_nodes.remove(normalized)
                 self.save_data()
                 return True
         return False
@@ -1221,31 +830,6 @@ def configure():
     """
     return render_template('configure.html')
 
-@app.route('/mine', methods=['GET'])
-def mine():
-    """
-    Example method to auto-mine a new block with a mining reward.
-    """
-    with blockchain.lock:
-        last_block = blockchain.last_block
-        proof = 100
-        blockchain.add_transaction(
-            tx_id=str(uuid4().hex),
-            sender=MINING_SENDER,
-            recipient=node_identifier,
-            file_name=None,
-            file_path=None,
-            alias="Manually mined block",
-            recipient_alias="",
-            signature=""
-        )
-        prev_hash = blockchain.hash(last_block)
-        block = blockchain.create_block(proof, prev_hash)
-    return jsonify({
-        "message":"New block forged",
-        "index": block["index"],
-        "transactions": block["transactions"],
-        "proof": block["proof"],
 @app.route('/validator/configure', methods=['GET', 'POST'])
 def configure_validator():
     if request.method == 'GET':
@@ -1332,125 +916,72 @@ def get_chain():
         pruned_chain.append(block)
 
     return jsonify({"chain": pruned_chain, "length": len(pruned_chain)}),200
+
 @app.route('/node/upload', methods=['POST'])
 def node_upload():
     upfile = request.files.get('file')
     if not upfile:
-        return jsonify({"error":"Missing file"}), 400
+        return jsonify({"error": "Missing file"}), 400
 
-    sender          = request.form.get('sender','')
-    recipient       = request.form.get('recipient','')
-    signature       = request.form.get('signature','')
-    tx_id           = request.form.get('tx_id','')
-    alias           = request.form.get('alias','')
-    recipient_alias = request.form.get('recipient_alias','')
-    is_sensitive    = request.form.get('is_sensitive','0')
+    sender = request.form.get('sender', '')
+    recipient = request.form.get('recipient', '')
+    signature = request.form.get('signature', '')
+    tx_id = request.form.get('tx_id', '')
+    alias = request.form.get('alias', '')
+    recipient_alias = request.form.get('recipient_alias', '')
+    is_sensitive = request.form.get('is_sensitive', '0')
 
-    file_name = request.form.get('file_name','')
-    file_path = request.form.get('file_path','')
-    if not file_name or not file_path:
-        return jsonify({"error":"Missing file_name/path in form data"}), 400
-
-
-    enc_key_b64   = request.form.get('enc_key_b64','')
-    enc_nonce_b64 = request.form.get('enc_nonce_b64','')
-    enc_tag_b64   = request.form.get('enc_tag_b64','')
-
-    with blockchain.lock:
-        if is_sensitive == "1" and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
-            store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
-
-        local_abs = os.path.join(".", file_path.lstrip("./"))
-
-        os.makedirs(os.path.dirname(local_abs), exist_ok=True)
-        upfile.save(local_abs)
-
-        idx = blockchain.add_transaction(
-            tx_id           = tx_id,
-            sender          = sender,
-            recipient       = recipient,
-            file_name       = file_name,
-            file_path       = file_path,
-            alias           = alias,
-            recipient_alias = recipient_alias,
-            signature       = signature,
-            is_sensitive    = is_sensitive
-        )
-    if not idx:
-        return jsonify({"error":"Invalid signature"}), 400
-
-    return jsonify({"message":f"File received, block = {idx}"}), 201
-   
-    if is_sensitive == "1" and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
-        store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
-
-
-    local_abs = os.path.join(".", file_path.lstrip("./"))  
-
-    os.makedirs(os.path.dirname(local_abs), exist_ok=True)
-    upfile.save(local_abs)
-
-    file_owner = normalize_netloc(request.host)
+    file_name = request.form.get('file_name', '')
     if not file_name:
-        return jsonify({"error":"Missing file_name in form data"}), 400
-
-    provided_path = request.form.get('file_path', '')
-    if provided_path and not _is_safe_subpath(provided_path, PENDING_FOLDER):
-        return jsonify({"error": "Invalid file_path supplied"}), 400
+        return jsonify({"error": "Missing file_name in form data"}), 400
 
     try:
         safe_file_name = _ensure_safe_filename(file_name)
     except ValueError:
         return jsonify({"error": "Invalid file_name supplied"}), 400
 
-    pending_filename = f"{uuid4().hex}_{safe_file_name}"
-    pending_rel = os.path.join(PENDING_FOLDER, pending_filename)
-    pending_abs = os.path.abspath(pending_rel)
-    pending_root = os.path.abspath(PENDING_FOLDER)
+    provided_path = request.form.get('file_path', '')
+    if provided_path and not _is_safe_subpath(provided_path, PENDING_FOLDER):
+        return jsonify({"error": "Invalid file_path supplied"}), 400
 
+    pending_filename = f"{uuid4().hex}_{safe_file_name}"
+    canonical_file_path = os.path.join(PENDING_FOLDER, pending_filename)
+    pending_abs = os.path.abspath(canonical_file_path)
+    pending_root = os.path.abspath(PENDING_FOLDER)
     if not pending_abs.startswith(os.path.join(pending_root, '')):
         return jsonify({"error": "Failed to derive safe pending path"}), 400
-
-
-    enc_key_b64   = request.form.get('enc_key_b64','')
-    enc_nonce_b64 = request.form.get('enc_nonce_b64','')
-    enc_tag_b64   = request.form.get('enc_tag_b64','')
-
-    if is_sensitive == "1" and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
-        store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
 
     os.makedirs(os.path.dirname(pending_abs), exist_ok=True)
     upfile.save(pending_abs)
 
-    canonical_file_path = os.path.join(PENDING_FOLDER, pending_filename)
+    enc_key_b64 = request.form.get('enc_key_b64', '')
+    enc_nonce_b64 = request.form.get('enc_nonce_b64', '')
+    enc_tag_b64 = request.form.get('enc_tag_b64', '')
+    if is_sensitive == '1' and enc_key_b64 and enc_nonce_b64 and enc_tag_b64:
+        store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
 
-    idx = blockchain.add_transaction(
-        tx_id           = tx_id,
-        sender          = sender,
-        recipient       = recipient,
-        file_name       = file_name,
-        file_path       = file_path,
-        alias           = alias,
-        recipient_alias = recipient_alias,
-        signature       = signature,
-        is_sensitive    = is_sensitive,
-        file_owner      = file_owner
-    )
+    file_owner = normalize_netloc(request.host)
+
+    with blockchain.lock:
+        idx = blockchain.add_transaction(
+            tx_id=tx_id,
+            sender=sender,
+            recipient=recipient,
+            file_name=safe_file_name,
+            file_path=canonical_file_path,
+            alias=alias,
+            recipient_alias=recipient_alias,
+            signature=signature,
+            is_sensitive=is_sensitive,
+            file_owner=file_owner,
+        )
+
     if not idx:
-        return jsonify({"error":"Invalid signature"}), 400
+        return jsonify({"error": "Invalid signature"}), 400
 
-    return jsonify({"message":f"File received, block = {idx}"}), 201
-        file_name       = safe_file_name,
-        file_path       = canonical_file_path,
-        alias           = alias,
-        recipient_alias = recipient_alias,
-        signature       = signature,
-        is_sensitive    = is_sensitive
-    )
-    if not idx:
-        return jsonify({"error":"Invalid signature"}), 400
+    return jsonify({"message": f"File received, block = {idx}"}), 201
 
-    return jsonify({"message":f"File received, block = {idx}"}), 201
+
 @app.route('/transactions/new', methods=['POST'])
 def new_transaction():
     data = request.get_json() or {}
@@ -1459,45 +990,35 @@ def new_transaction():
     if "tx_id" not in data:
         data["tx_id"] = str(uuid4().hex)
 
-    needed = ["tx_id","sender","recipient","file_name","file_path","signature"]
-    if not all(k in data for k in needed):
-        return "Missing values",400
+    required = ["tx_id", "sender", "recipient", "file_name", "file_path", "signature"]
+    if not all(key in data for key in required):
+        return "Missing values", 400
 
-    with blockchain.lock:
-        idx = blockchain.add_transaction(
-            tx_id           = data["tx_id"],
-            sender          = data['sender'],
-            recipient       = data['recipient'],
-            file_name       = data['file_name'],
-            file_path       = data['file_path'],
-            alias           = data.get('alias',''),
-            recipient_alias = data.get('recipient_alias',''),
-            signature       = data['signature'],
-            is_sensitive    = data.get('is_sensitive','0')
-        )
     try:
-        data['file_name'] = _ensure_safe_filename(data['file_name'])
+        data["file_name"] = _ensure_safe_filename(data["file_name"])
     except ValueError:
         return "Invalid file_name", 400
 
-    file_path_value = data['file_path']
+    file_path_value = data["file_path"]
     if not (_is_safe_subpath(file_path_value, PENDING_FOLDER) or _is_safe_subpath(file_path_value, UPLOAD_FOLDER)):
         return "Invalid file_path", 400
 
-    idx = blockchain.add_transaction(
-        tx_id           = data["tx_id"],
-        sender          = data['sender'],
-        recipient       = data['recipient'],
-        file_name       = data['file_name'],
-        file_path       = data['file_path'],
-        alias           = data.get('alias',''),
-        recipient_alias = data.get('recipient_alias',''),
-        signature       = data['signature'],
-        is_sensitive    = data.get('is_sensitive','0'),
-        file_owner      = data.get('file_owner')
-    )
+    with blockchain.lock:
+        idx = blockchain.add_transaction(
+            tx_id=data["tx_id"],
+            sender=data['sender'],
+            recipient=data['recipient'],
+            file_name=data['file_name'],
+            file_path=data['file_path'],
+            alias=data.get('alias', ''),
+            recipient_alias=data.get('recipient_alias', ''),
+            signature=data['signature'],
+            is_sensitive=data.get('is_sensitive', '0'),
+            file_owner=data.get('file_owner'),
+        )
+
     if not idx:
-        return "Invalid signature",400
+        return "Invalid signature", 400
 
     stored_tx = blockchain.get_transaction_by_id(data["tx_id"])
     if stored_tx and stored_tx.get("file_owner"):
@@ -1506,21 +1027,7 @@ def new_transaction():
     if idx and not skip_broadcast:
         blockchain.broadcast_new_transaction(data)
 
-    return jsonify({"message": f"Transaction will be added to block {idx}"}),201
-        file_name       = data['file_name'],
-        file_path       = data['file_path'],
-        alias           = data.get('alias',''),
-        recipient_alias = data.get('recipient_alias',''),
-        signature       = data['signature'],
-        is_sensitive    = data.get('is_sensitive','0')
-    )
-    if not idx:
-        return "Invalid signature",400
-
-    if idx and not skip_broadcast:
-        blockchain.broadcast_new_transaction(data)
-
-    return jsonify({"message": f"Transaction will be added to block {idx}"}),201
+    return jsonify({"message": f"Transaction will be added to block {idx}"}), 201
 
 @app.route('/transactions/get', methods=['GET'])
 def get_transactions():
