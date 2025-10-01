@@ -1,8 +1,11 @@
+import binascii
 import importlib
 import os
 import sys
 from pathlib import Path
+
 import pytest
+from Crypto.PublicKey import RSA
 
 # Ensure repository root is on sys.path when running inside temporary dirs
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +33,12 @@ def isolated_blockchain(tmp_path, monkeypatch):
     bc.transactions = []
     bc.nodes = set()
     bc.trusted_nodes = set()
+
+    # Configure a validator identity so tests can mine blocks without network setup.
+    rsa_key = RSA.generate(1024)
+    private_key_hex = binascii.hexlify(rsa_key.export_key(format='DER')).decode('ascii')
+    public_key_hex = binascii.hexlify(rsa_key.publickey().export_key(format='DER')).decode('ascii')
+    bc.set_validator_identity('test-validator', private_key_hex, public_key_hex=public_key_hex)
 
     return bc, blockchain_module
 
