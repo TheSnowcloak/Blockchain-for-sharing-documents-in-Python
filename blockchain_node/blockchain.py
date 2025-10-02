@@ -61,6 +61,9 @@ SYNC_FAILURE_LOG_SIZE = int(os.getenv("SYNC_FAILURE_LOG_SIZE", "200"))
 SYNC_DEFERRED_RETRY_LIMIT = int(os.getenv("SYNC_DEFERRED_RETRY_LIMIT", "3"))
 SYNC_DEFERRED_RETRY_DELAY = float(os.getenv("SYNC_DEFERRED_RETRY_DELAY", "15"))
 
+_LOCAL_HOST_LOCK = threading.Lock()
+_LOCAL_HOST_CACHE = None
+
 def _ensure_safe_filename(name: str) -> str:
     safe_name = secure_filename(name)
     if not safe_name or safe_name != name:
@@ -182,6 +185,86 @@ def normalize_netloc(address: str) -> str:
     host = parsed.hostname.strip()
     port = parsed.port or 5000
     return f"{_format_host_for_netloc(host)}:{port}"
+
+
+def _get_configured_self_netlocs():
+    sources = []
+    config_value = app.config.get("LOCAL_NODE_NETLOCS")
+    if config_value:
+        sources.append(config_value)
+    env_value = os.getenv("LOCAL_NODE_NETLOCS")
+    if env_value:
+        sources.append(env_value)
+
+    configured = []
+    seen = set()
+    for raw in sources:
+        for entry in _coerce_node_entries(raw):
+            try:
+                normalized = normalize_netloc(entry)
+            except ValueError:
+                logging.warning("Ignoring invalid LOCAL_NODE_NETLOCS entry: %s", entry)
+                continue
+            if normalized not in seen:
+                configured.append(normalized)
+                seen.add(normalized)
+    return tuple(configured)
+
+
+def _get_known_local_hosts():
+    global _LOCAL_HOST_CACHE
+    with _LOCAL_HOST_LOCK:
+        if _LOCAL_HOST_CACHE is not None:
+            return _LOCAL_HOST_CACHE
+
+    hosts = {"localhost", "127.0.0.1", "::1"}
+    for getter in (socket.gethostname, socket.getfqdn):
+        try:
+            value = getter()
+        except OSError:
+            continue
+        if not value:
+            continue
+        hosts.add(value)
+        try:
+            _name, _alias, ip_list = socket.gethostbyname_ex(value)
+        except (socket.gaierror, UnicodeError):
+            ip_list = []
+        hosts.update(ip_list)
+
+    with _LOCAL_HOST_LOCK:
+        _LOCAL_HOST_CACHE = tuple(hosts)
+    return _LOCAL_HOST_CACHE
+
+
+def _host_header_matches_local(host_netloc, remote_addr, configured_netlocs, resolver):
+    try:
+        host, _ = _split_host_port(host_netloc)
+    except ValueError:
+        return False
+
+    allowed_hosts = set(_get_known_local_hosts())
+
+    for netloc in configured_netlocs:
+        try:
+            cfg_host, _ = _split_host_port(netloc)
+        except ValueError:
+            continue
+        allowed_hosts.add(cfg_host)
+        for ip_item in resolver(cfg_host):
+            allowed_hosts.add(ip_item)
+
+    if remote_addr:
+        allowed_hosts.add(remote_addr)
+
+    if host in allowed_hosts:
+        return True
+
+    for resolved in resolver(host):
+        if resolved in allowed_hosts:
+            return True
+
+    return False
 
 ##############################################
 # Encryption keys database (just for demonstration)
@@ -1367,7 +1450,39 @@ def node_upload():
         and enc_tag_b64
     )
 
-    file_owner = normalize_netloc(request.host)
+    host_header = request.host or ""
+    if not host_header:
+        return jsonify({"error": "Missing Host header"}), 400
+
+    try:
+        normalized_host_header = normalize_netloc(host_header)
+    except ValueError:
+        return jsonify({"error": "Invalid Host header"}), 400
+
+    configured_self_netlocs = list(_get_configured_self_netlocs())
+    with blockchain.lock:
+        validator_netloc = blockchain.validator_netloc
+    if validator_netloc:
+        try:
+            normalized_validator = normalize_netloc(validator_netloc)
+        except ValueError:
+            logging.warning("Validator netloc is invalid: %s", validator_netloc)
+        else:
+            if normalized_validator not in configured_self_netlocs:
+                configured_self_netlocs.insert(0, normalized_validator)
+
+    if not _host_header_matches_local(
+        normalized_host_header,
+        request.remote_addr,
+        configured_self_netlocs,
+        blockchain._resolve_host_to_ips,
+    ):
+        return jsonify({"error": "Host header does not identify this node"}), 400
+
+    if configured_self_netlocs:
+        file_owner = configured_self_netlocs[0]
+    else:
+        file_owner = normalized_host_header
 
     with blockchain.lock:
         block_index, added = blockchain.add_transaction(
