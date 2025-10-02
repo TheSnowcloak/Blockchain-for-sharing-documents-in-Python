@@ -17,6 +17,7 @@ import datetime
 import time
 import threading
 import requests
+import re
 
 from flask import Flask, jsonify, request, render_template, send_from_directory, send_file, abort
 from flask_cors import CORS
@@ -73,6 +74,62 @@ def _is_safe_subpath(path_value: str, base_directory: str) -> bool:
     abs_base = os.path.abspath(base_directory)
     abs_target = os.path.abspath(os.path.join('.', normalized.lstrip('./')))
     return abs_target.startswith(os.path.join(abs_base, ''))
+
+
+def _coerce_node_entries(raw_value):
+    """Return a flat list of node strings from a flexible payload."""
+
+    def _split_simple(text: str):
+        parts = re.split(r'[\s,;]+', text)
+        cleaned = []
+        for part in parts:
+            candidate = part.strip()
+            if not candidate:
+                continue
+            if '=' in candidate:
+                candidate = candidate.split('=', 1)[1].strip()
+                if not candidate:
+                    continue
+            cleaned.append(candidate)
+        return cleaned
+
+    if raw_value is None:
+        return []
+
+    if isinstance(raw_value, dict):
+        nodes = []
+        if 'nodes' in raw_value:
+            nodes.extend(_coerce_node_entries(raw_value['nodes']))
+        if 'node' in raw_value:
+            nodes.extend(_coerce_node_entries(raw_value['node']))
+        return nodes
+
+    if isinstance(raw_value, (list, tuple, set)):
+        nodes = []
+        for item in raw_value:
+            nodes.extend(_coerce_node_entries(item))
+        return nodes
+
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return []
+
+        # Handle strings that look like JSON structures.
+        if (text.startswith('[') and text.endswith(']')) or (text.startswith('{') and text.endswith('}')):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                pass
+            else:
+                return _coerce_node_entries(parsed)
+
+        if text.startswith('"') and text.endswith('"') and len(text) >= 2:
+            return _coerce_node_entries(text[1:-1])
+
+        return _split_simple(text)
+
+    return []
 
 ###################################
 # Utility to unify IP:port format
@@ -1297,18 +1354,30 @@ def get_nodes():
 
 @app.route('/trusted_nodes/register', methods=['POST'])
 def register_trusted_nodes():
-    if request.is_json:
-        val = request.get_json()
-        node_netlocs = val.get('nodes')
-    else:
-        node_netlocs = request.form.get('nodes','').split(',')
+    node_netlocs = []
+
+    payload = request.get_json(silent=True)
+    if payload is not None:
+        node_netlocs.extend(_coerce_node_entries(payload))
+
+    if not node_netlocs and request.form:
+        node_netlocs.extend(_coerce_node_entries(request.form.to_dict(flat=False)))
+
+    if not node_netlocs and request.args:
+        node_netlocs.extend(_coerce_node_entries(request.args.to_dict(flat=False)))
 
     if not node_netlocs:
+        raw_body = request.get_data(as_text=True).strip()
+        if raw_body:
+            node_netlocs.extend(_coerce_node_entries(raw_body))
+
+    filtered_netlocs = [item.strip() for item in node_netlocs if item.strip()]
+    if not filtered_netlocs:
         return jsonify({"message": "No trusted nodes"}),400
 
     with blockchain.lock:
-        for netloc in node_netlocs:
-            blockchain.add_trusted_node(netloc.strip())
+        for netloc in filtered_netlocs:
+            blockchain.add_trusted_node(netloc)
         trusted_snapshot = list(blockchain.trusted_nodes)
 
     return jsonify({
