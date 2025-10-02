@@ -335,7 +335,7 @@ class Blockchain:
         with self._lock:
             if self.transaction_exists(tx_id):
                 logging.info(f"Transaction {tx_id} already known. Duplicate ignored.")
-                return self.last_block["index"]
+                return self.last_block["index"], False
 
             transaction = OrderedDict({
                 "tx_id": tx_id,
@@ -357,7 +357,7 @@ class Blockchain:
                 signable = self._build_signable_transaction(transaction)
                 if not self.verify_signature(sender, signature, signable):
                     logging.error("Signature invalid!")
-                    return False
+                    return None, False
 
             if file_owner:
                 try:
@@ -376,7 +376,7 @@ class Blockchain:
                 except PermissionError as exc:
                     logging.error(f"Auto-mining skipped: {exc}")
 
-            return self.last_block["index"]
+            return self.last_block["index"], True
 
     def verify_signature(self, sender_pub_hex, signature_hex, transaction):
         try:
@@ -1135,7 +1135,7 @@ def node_upload():
     file_owner = normalize_netloc(request.host)
 
     with blockchain.lock:
-        idx = blockchain.add_transaction(
+        block_index, added = blockchain.add_transaction(
             tx_id=tx_id,
             sender=sender,
             recipient=recipient,
@@ -1149,7 +1149,7 @@ def node_upload():
             stored_file_name=pending_filename,
         )
 
-    if not idx:
+    if block_index is None:
         try:
             os.remove(pending_abs)
         except FileNotFoundError:
@@ -1170,10 +1170,23 @@ def node_upload():
             )
         return jsonify({"error": "Invalid signature"}), 400
 
-    if has_encryption_payload:
+    if not added:
+        try:
+            os.remove(pending_abs)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logging.warning(
+                "Failed to remove duplicate pending upload for tx %s: %s",
+                tx_id,
+                exc,
+            )
+        return jsonify({"message": f"File already received, block = {block_index}"}), 200
+
+    if has_encryption_payload and added:
         store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
 
-    return jsonify({"message": f"File received, block = {idx}"}), 201
+    return jsonify({"message": f"File received, block = {block_index}"}), 201
 
 
 @app.route('/transactions/new', methods=['POST'])
@@ -1211,7 +1224,7 @@ def new_transaction():
             return "Invalid stored_file_name", 400
 
     with blockchain.lock:
-        idx = blockchain.add_transaction(
+        block_index, added = blockchain.add_transaction(
             tx_id=data["tx_id"],
             sender=data['sender'],
             recipient=data['recipient'],
@@ -1225,17 +1238,20 @@ def new_transaction():
             stored_file_name=data.get('stored_file_name'),
         )
 
-    if not idx:
+    if block_index is None:
         return "Invalid signature", 400
 
     stored_tx = blockchain.get_transaction_by_id(data["tx_id"])
     if stored_tx and stored_tx.get("file_owner"):
         data['file_owner'] = stored_tx['file_owner']
 
-    if idx and not skip_broadcast:
+    if added and block_index and not skip_broadcast:
         blockchain.broadcast_new_transaction(data)
 
-    return jsonify({"message": f"Transaction will be added to block {idx}"}), 201
+    if added:
+        return jsonify({"message": f"Transaction will be added to block {block_index}"}), 201
+
+    return jsonify({"message": f"Transaction already accepted in block {block_index}"}), 200
 
 @app.route('/transactions/get', methods=['GET'])
 def get_transactions():
