@@ -200,6 +200,67 @@ def test_sync_files_skips_owner_when_local_node(isolated_blockchain, monkeypatch
     assert scheduled == [("peer-b:5000", 1)]
 
 
+def test_sync_files_rejects_paths_outside_uploads(isolated_blockchain, monkeypatch, tmp_path):
+    bc, module = isolated_blockchain
+
+    tampered_path = "./uploads/../../evil.txt"
+    tx = {
+        "tx_id": "tx-unsafe",
+        "sender": "sender",
+        "recipient": "recipient",
+        "file_name": "evil.txt",
+        "file_path": tampered_path,
+        "alias": "",
+        "recipient_alias": "",
+        "is_sensitive": "0",
+        "file_owner": "peer-a:5000",
+    }
+
+    bc.chain = [{
+        "index": 1,
+        "timestamp": "now",
+        "transactions": [tx],
+        "proof": 100,
+        "previous_hash": "hash",
+    }]
+    bc.nodes = {"peer-a:5000"}
+
+    class DummyResponse:
+        def __init__(self, status, json_data=None):
+            self.status_code = status
+            self._json = json_data
+
+        def json(self):
+            if self._json is None:
+                raise ValueError("No JSON body")
+            return self._json
+
+        def iter_content(self, chunk_size):
+            raise AssertionError("File download should not be attempted for unsafe paths")
+
+    calls = []
+
+    def fake_get(url, *args, **kwargs):
+        calls.append(url)
+        if url == "http://peer-a:5000/chain":
+            return DummyResponse(200, {"chain": bc.chain})
+        raise AssertionError(f"Unexpected URL requested: {url}")
+
+    monkeypatch.setattr(module.requests, "get", fake_get)
+
+    bc.sync_files()
+
+    assert not (tmp_path / "evil.txt").exists(), "Tampered file must not be written outside uploads"
+    assert all("/file/" not in call for call in calls if call != "http://peer-a:5000/chain")
+
+    failures = bc.get_sync_failures()
+    assert any(
+        entry.get("stage") == "validation"
+        and "unsafe file path" in (entry.get("error") or "").lower()
+        for entry in failures
+    ), "Unsafe path rejection should be recorded"
+
+
 def test_file_route_and_sync_use_stored_filename(isolated_blockchain, monkeypatch):
     bc, module = isolated_blockchain
 

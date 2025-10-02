@@ -442,6 +442,20 @@ class Blockchain:
         file_path = tx.get("file_path")
         if not file_path:
             return
+        normalized_path = os.path.normpath(file_path)
+        safe_relative_path = os.path.join(
+            ".", normalized_path.lstrip("./")
+        )
+        if not _is_safe_subpath(safe_relative_path, UPLOAD_FOLDER):
+            self._record_sync_failure(
+                "download",
+                netloc,
+                filename=tx.get("stored_file_name") or tx.get("file_name"),
+                error=f"Rejected unsafe file path: {file_path}",
+                attempt=attempt,
+                stage="deferred-validation",
+            )
+            return
         key = (netloc, file_path)
         with self._deferred_retry_lock:
             current_attempt = self._pending_deferred_retries.get(key, 0)
@@ -463,7 +477,22 @@ class Blockchain:
         if not file_path:
             return
         key = (netloc, file_path)
-        local_abs = os.path.join(".", file_path)
+        normalized_path = os.path.normpath(file_path)
+        safe_relative_path = os.path.join(
+            ".", normalized_path.lstrip("./")
+        )
+        if not _is_safe_subpath(safe_relative_path, UPLOAD_FOLDER):
+            self._record_sync_failure(
+                "download",
+                netloc,
+                filename=tx.get("stored_file_name") or tx.get("file_name"),
+                error=f"Rejected unsafe file path: {file_path}",
+                attempt=attempt,
+                stage="deferred-validation",
+            )
+            self._clear_deferred_retry(key)
+            return
+        local_abs = safe_relative_path
         if os.path.exists(local_abs):
             self._clear_deferred_retry(key)
             return
@@ -689,9 +718,23 @@ class Blockchain:
                     if tx.get("is_sensitive", "0") == "1" and netloc not in trusted_snapshot:
                         continue
                     file_path = tx.get("file_path", "")
-                    if not file_path or not file_path.startswith("./uploads/"):
+                    if not file_path:
                         continue
-                    local_abs = os.path.join(".", file_path)
+                    normalized_path = os.path.normpath(file_path)
+                    safe_relative_path = os.path.join(
+                        ".", normalized_path.lstrip("./")
+                    )
+                    if not _is_safe_subpath(safe_relative_path, UPLOAD_FOLDER):
+                        self._record_sync_failure(
+                            "download",
+                            normalized_source,
+                            filename=tx.get("stored_file_name")
+                            or tx.get("file_name"),
+                            error=f"Rejected unsafe file path: {file_path}",
+                            stage="validation",
+                        )
+                        continue
+                    local_abs = safe_relative_path
                     key = (netloc, file_path)
                     if os.path.exists(local_abs):
                         self._clear_deferred_retry(key)
