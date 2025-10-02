@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import unittest
 from unittest import mock
@@ -14,6 +15,16 @@ class UploadSecurityTestCase(unittest.TestCase):
         node_module.blockchain.transactions = []
         self._created_paths = []
         self._keys_db_backup = None
+        for folder in (node_module.PENDING_FOLDER, node_module.UPLOAD_FOLDER):
+            if not os.path.isdir(folder):
+                continue
+            for name in os.listdir(folder):
+                path = os.path.join(folder, name)
+                if os.path.isfile(path):
+                    try:
+                        os.remove(path)
+                    except FileNotFoundError:
+                        pass
         if os.path.exists(node_module.KEYS_DB_FILE):
             with open(node_module.KEYS_DB_FILE, 'r', encoding='utf-8') as fh:
                 self._keys_db_backup = fh.read()
@@ -133,6 +144,77 @@ class UploadSecurityTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400, response.data)
         self.assertFalse(os.path.exists(expected_pending_path))
         self.assertFalse(os.path.exists(node_module.KEYS_DB_FILE))
+
+    def test_duplicate_upload_is_idempotent(self):
+        tx_id = uuid.uuid4().hex
+        file_name = 'document.txt'
+        first_uuid_hex = '11111111111111111111111111111111'
+        second_uuid_hex = '22222222222222222222222222222222'
+        first_uuid = type('DummyUUID', (), {'hex': first_uuid_hex})()
+        second_uuid = type('DummyUUID', (), {'hex': second_uuid_hex})()
+
+        data = {
+            'sender': node_module.MINING_SENDER,
+            'recipient': 'recipient',
+            'signature': '',
+            'tx_id': tx_id,
+            'alias': '',
+            'recipient_alias': '',
+            'is_sensitive': '1',
+            'file_name': file_name,
+            'file_path': './pending_uploads/ignored.txt',
+            'enc_key_b64': 'Zmlyc3QtY2lwaGVyLWtleQ==',
+            'enc_nonce_b64': 'Zmlyc3Qtbm9uY2U=',
+            'enc_tag_b64': 'Zmlyc3QtdGFn',
+        }
+
+        with mock.patch.object(node_module, 'uuid4', side_effect=[first_uuid, second_uuid]):
+            response_first = self.client.post(
+                '/node/upload',
+                data={**data, 'file': (BytesIO(b'ciphertext-1'), file_name)},
+                content_type='multipart/form-data',
+            )
+
+            self.assertEqual(response_first.status_code, 201, response_first.data)
+
+            pending_files_after_first = set(os.listdir(node_module.PENDING_FOLDER))
+            expected_pending_name = f"{first_uuid_hex}_{file_name}"
+            self.assertIn(expected_pending_name, pending_files_after_first)
+            first_pending_path = os.path.abspath(
+                os.path.join(node_module.PENDING_FOLDER, expected_pending_name)
+            )
+            self._created_paths.append(first_pending_path)
+            self.assertTrue(os.path.exists(first_pending_path))
+
+            with open(node_module.KEYS_DB_FILE, 'r', encoding='utf-8') as fh:
+                first_keys_state = json.load(fh)
+
+            self.assertIn(tx_id, first_keys_state)
+            self.assertEqual(
+                first_keys_state[tx_id]['enc_key_b64'],
+                'Zmlyc3QtY2lwaGVyLWtleQ==',
+            )
+
+            data['enc_key_b64'] = 'c2Vjb25kLWNpcGhlci1rZXk='
+            data['enc_nonce_b64'] = 'c2Vjb25kLW5vbmNl'
+            data['enc_tag_b64'] = 'c2Vjb25kLXRhZw=='
+
+            response_second = self.client.post(
+                '/node/upload',
+                data={**data, 'file': (BytesIO(b'ciphertext-2'), file_name)},
+                content_type='multipart/form-data',
+            )
+
+        self.assertEqual(response_second.status_code, 200, response_second.data)
+        self.assertIn(b'File already received', response_second.data)
+
+        after_second = set(os.listdir(node_module.PENDING_FOLDER))
+        self.assertEqual(after_second, pending_files_after_first)
+
+        with open(node_module.KEYS_DB_FILE, 'r', encoding='utf-8') as fh:
+            final_keys_state = json.load(fh)
+
+        self.assertEqual(final_keys_state, first_keys_state)
 
 
 if __name__ == '__main__':
