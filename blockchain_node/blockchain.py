@@ -493,9 +493,16 @@ class Blockchain:
 
             if file_owner:
                 try:
-                    transaction["file_owner"] = normalize_netloc(file_owner)
-                except Exception:
-                    transaction["file_owner"] = file_owner
+                    normalized_owner = normalize_netloc(file_owner)
+                except Exception as exc:
+                    logging.warning(
+                        "Ignoring invalid file_owner %r for transaction %s: %s",
+                        file_owner,
+                        tx_id,
+                        exc,
+                    )
+                else:
+                    transaction["file_owner"] = normalized_owner
 
             self.transactions.append(transaction)
 
@@ -1103,26 +1110,36 @@ class Blockchain:
                     owner_netloc = tx.get("file_owner")
                     attempted_owner = False
                     owner_key = None
+                    owner_normalized = None
                     if not success and owner_netloc:
-                        owner_netloc = normalize_netloc(owner_netloc)
-                        if owner_netloc != normalized_source and owner_netloc != local_netloc:
-                            attempted_owner = True
-                            owner_key = (owner_netloc, file_path)
-                            success = self._download_file_with_retry(
+                        try:
+                            owner_normalized = normalize_netloc(owner_netloc)
+                        except Exception as exc:
+                            logging.warning(
+                                "Skipping owner retry for %s due to invalid netloc %r: %s",
+                                file_path,
                                 owner_netloc,
-                                tx,
-                                local_abs,
-                                attempt_offset=self.sync_max_retries,
+                                exc,
                             )
-                            if success:
-                                self._clear_deferred_retry(owner_key)
+                        else:
+                            if owner_normalized != normalized_source and owner_normalized != local_netloc:
+                                attempted_owner = True
+                                owner_key = (owner_normalized, file_path)
+                                success = self._download_file_with_retry(
+                                    owner_normalized,
+                                    tx,
+                                    local_abs,
+                                    attempt_offset=self.sync_max_retries,
+                                )
+                                if success:
+                                    self._clear_deferred_retry(owner_key)
                     if success:
                         self._clear_deferred_retry(key)
                         if attempted_owner and owner_key:
                             self._clear_deferred_retry(owner_key)
                     else:
-                        if attempted_owner and owner_key:
-                            self._schedule_deferred_retry(owner_netloc, tx, attempt=1)
+                        if attempted_owner and owner_key and owner_normalized:
+                            self._schedule_deferred_retry(owner_normalized, tx, attempt=1)
                         else:
                             self._schedule_deferred_retry(netloc, tx, attempt=1)
 

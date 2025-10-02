@@ -262,6 +262,59 @@ class UploadSecurityTestCase(unittest.TestCase):
         if os.path.exists(pending_abs):
             self._created_paths.append(pending_abs)
 
+    def test_invalid_file_owner_does_not_break_sync(self):
+        tx_id = uuid.uuid4().hex
+        invalid_owner = 'http://example.com:badport'
+        payload = {
+            'tx_id': tx_id,
+            'sender': node_module.MINING_SENDER,
+            'recipient': 'recipient',
+            'file_name': 'document.txt',
+            'file_path': './uploads/nonexistent.txt',
+            'signature': '',
+            'file_owner': invalid_owner,
+        }
+
+        response = self.client.post('/transactions/new', json=payload)
+        self.assertEqual(response.status_code, 201, response.data)
+
+        stored_tx = node_module.blockchain.get_transaction_by_id(tx_id)
+        self.assertIsNotNone(stored_tx)
+        self.assertNotEqual(stored_tx.get('file_owner'), invalid_owner)
+        self.assertNotIn('file_owner', stored_tx)
+
+        original_nodes = set(node_module.blockchain.nodes)
+        original_trusted = set(node_module.blockchain.trusted_nodes)
+
+        def restore_network():
+            node_module.blockchain.nodes = set(original_nodes)
+            node_module.blockchain.trusted_nodes = set(original_trusted)
+
+        self.addCleanup(restore_network)
+
+        node_module.blockchain.nodes = {'peer-a:5000'}
+        node_module.blockchain.trusted_nodes = set()
+
+        remote_tx = dict(stored_tx)
+        remote_tx['file_owner'] = invalid_owner
+        block_payload = [{'transactions': [remote_tx]}]
+
+        with mock.patch.object(node_module.blockchain, '_fetch_chain_with_retry', return_value=block_payload) as mock_fetch, \
+            mock.patch.object(node_module.blockchain, '_download_file_with_retry', return_value=False) as mock_download, \
+            mock.patch.object(node_module.blockchain, '_schedule_deferred_retry') as mock_schedule, \
+            mock.patch.object(node_module.blockchain, '_clear_deferred_retry') as mock_clear:
+
+            node_module.blockchain.sync_files()
+
+        mock_fetch.assert_called_once_with('peer-a:5000')
+        self.assertEqual(mock_download.call_count, 1)
+        mock_schedule.assert_called_once()
+        scheduled_args = mock_schedule.call_args.args
+        scheduled_kwargs = mock_schedule.call_args.kwargs
+        self.assertEqual(scheduled_args[0], 'peer-a:5000')
+        self.assertEqual(scheduled_kwargs.get('attempt'), 1)
+        mock_clear.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
