@@ -148,10 +148,10 @@ def upload_form():
         enc_nonce_b64 = nonce_b64
         enc_tag_b64   = tag_b64
 
-        app.logger.info(f"SENSITIVE file => {local_abs}")
-        app.logger.info(f"  encryption key (base64) = {key_b64}")
-        app.logger.info(f"  nonce = {nonce_b64}")
-        app.logger.info(f"  tag   = {tag_b64}")
+        if app.debug:
+            app.logger.debug("Sensitive file encrypted for upload")
+        else:
+            app.logger.info("Sensitive file encrypted for upload")
     else:
         # No encryption
         with open(local_abs, 'wb') as f:
