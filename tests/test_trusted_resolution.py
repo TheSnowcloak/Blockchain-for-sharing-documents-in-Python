@@ -68,3 +68,21 @@ def test_hostname_resolution_allows_trusted_access(isolated_app, monkeypatch):
     )
     assert second.status_code == 200
     assert lookup_calls == ["trusted.example.com"], "DNS lookup should be cached after first resolution"
+
+
+def test_ipv6_bracketed_trusted_registration(isolated_app):
+    module = isolated_app
+    blockchain = module.blockchain
+
+    blockchain.add_trusted_node("[::1]:5000")
+    assert "[::1]:5000" in blockchain.trusted_nodes
+
+    client = module.app.test_client()
+
+    response = client.get(
+        "/trusted_nodes/keys",
+        environ_base={"REMOTE_ADDR": "::1"},
+    )
+
+    assert response.status_code == 200
+    assert "::1" in blockchain.get_trusted_netloc_ips("[::1]:5000")
