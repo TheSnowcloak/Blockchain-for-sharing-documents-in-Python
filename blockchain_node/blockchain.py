@@ -243,6 +243,9 @@ def _host_header_matches_local(host_netloc, remote_addr, configured_netlocs, res
     except ValueError:
         return False
 
+    # ``remote_addr`` is intentionally ignored. Only explicitly configured or
+    # locally resolvable hosts are treated as valid identifiers for this node.
+
     allowed_hosts = set(_get_known_local_hosts())
 
     for netloc in configured_netlocs:
@@ -253,9 +256,6 @@ def _host_header_matches_local(host_netloc, remote_addr, configured_netlocs, res
         allowed_hosts.add(cfg_host)
         for ip_item in resolver(cfg_host):
             allowed_hosts.add(ip_item)
-
-    if remote_addr:
-        allowed_hosts.add(remote_addr)
 
     if host in allowed_hosts:
         return True
@@ -1518,6 +1518,7 @@ def node_upload():
 
     try:
         normalized_host_header = normalize_netloc(host_header)
+        header_host, header_port = _split_host_port(normalized_host_header)
     except ValueError:
         return jsonify({"error": "Invalid Host header"}), 400
 
@@ -1541,10 +1542,30 @@ def node_upload():
     ):
         return jsonify({"error": "Host header does not identify this node"}), 400
 
-    if configured_self_netlocs:
-        file_owner = configured_self_netlocs[0]
-    else:
-        file_owner = normalized_host_header
+    if not configured_self_netlocs:
+        return jsonify({"error": "LOCAL_NODE_NETLOCS must be configured"}), 400
+
+    header_ips = set(blockchain._resolve_host_to_ips(header_host))
+    header_ips.add(header_host)
+
+    matched_owner = None
+    for candidate in configured_self_netlocs:
+        try:
+            candidate_host, candidate_port = _split_host_port(candidate)
+        except ValueError:
+            continue
+        if candidate_port is not None and candidate_port != header_port:
+            continue
+        if candidate_host == header_host:
+            matched_owner = candidate
+            break
+        candidate_ips = set(blockchain._resolve_host_to_ips(candidate_host))
+        candidate_ips.add(candidate_host)
+        if header_ips & candidate_ips:
+            matched_owner = candidate
+            break
+
+    file_owner = matched_owner or configured_self_netlocs[0]
 
     with blockchain.lock:
         block_index, added = blockchain.add_transaction(
