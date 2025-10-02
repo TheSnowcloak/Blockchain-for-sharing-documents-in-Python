@@ -63,17 +63,45 @@
   <h2>Node configuration</h2>
   <p>Add/remove nodes, check if they are online (/ping)</p>
 
-  <!-- Adding new nodes -->
-  <div class="form-group">
-    <label for="nodesInput">Node URLs (comma-separated):</label>
-    <input type="text" id="nodesInput" class="form-control"
-           placeholder="e.g. 192.168.1.11:5000, 192.168.1.12:5000">
-  </div>
-  <button id="addNodesBtn" class="btn btn-primary">Add nodes</button>
+  <div class="row g-4">
+    <div class="col-lg-6">
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <h4 class="card-title">Nodes</h4>
+          <p class="card-text">Manage known peers that participate in gossip and syncing.</p>
 
-  <hr>
-  <h4>Nodes:</h4>
-  <ul id="nodesList" class="list-group"></ul>
+          <div class="mb-3">
+            <label class="form-label" for="nodesInput">Node URLs (comma-separated):</label>
+            <input type="text" id="nodesInput" class="form-control"
+                   placeholder="e.g. 192.168.1.11:5000, 192.168.1.12:5000">
+          </div>
+          <button id="addNodesBtn" class="btn btn-primary">Add nodes</button>
+
+          <hr>
+          <ul id="nodesList" class="list-group"></ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-6">
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <h4 class="card-title">Trusted validators</h4>
+          <p class="card-text">Promote validators to the trusted set to enable block approval.</p>
+
+          <div class="mb-3">
+            <label class="form-label" for="trustedNodesInput">Trusted node URLs (comma-separated):</label>
+            <input type="text" id="trustedNodesInput" class="form-control"
+                   placeholder="e.g. validator.example.com:6000">
+          </div>
+          <button id="addTrustedNodesBtn" class="btn btn-success">Add trusted nodes</button>
+
+          <hr>
+          <ul id="trustedNodesList" class="list-group"></ul>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.0/dist/jquery.min.js"></script>
@@ -132,11 +160,92 @@ async function removeNode(node) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ node })
     });
-    const resp = await r.json();
-    alert(resp.message);
+    const resp = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const message = resp && resp.message ? resp.message : 'Error removing node';
+      throw new Error(message);
+    }
+    alert(resp.message || 'Node removed');
     loadNodes();
   } catch(err) {
-    alert("Error removing node: " + err);
+    alert("Error removing node: " + err.message);
+  }
+}
+
+async function loadTrustedNodes() {
+  try {
+    const resp = await fetch('/trusted_nodes/get');
+    if (!resp.ok) throw new Error("Fetch /trusted_nodes/get failed");
+    const data = await resp.json();
+    const trustedNodes = data.trusted_nodes || [];
+
+    const trustedList = document.getElementById('trustedNodesList');
+    trustedList.innerHTML = '';
+
+    if (trustedNodes.length === 0) {
+      trustedList.innerHTML = "<li class='list-group-item'>No trusted nodes</li>";
+      return;
+    }
+
+    trustedNodes.forEach(node => {
+      const li = document.createElement('li');
+      li.className = 'list-group-item d-flex justify-content-between align-items-center';
+
+      const indicator = document.createElement('span');
+      indicator.className = 'online-indicator offline';
+
+      const textSpan = document.createElement('span');
+      textSpan.textContent = node;
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'btn btn-danger btn-sm';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', () => {
+        removeTrustedNode(node);
+      });
+
+      li.appendChild(indicator);
+      li.appendChild(textSpan);
+      li.appendChild(removeBtn);
+      trustedList.appendChild(li);
+
+      checkNodeOnline(node, indicator);
+    });
+  } catch (e) {
+    alert("Unable to load trusted nodes: " + e);
+  }
+}
+
+async function addTrustedNodes(nodes) {
+  const resp = await fetch('/trusted_nodes/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nodes })
+  });
+  const payload = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    const message = payload && payload.message ? payload.message : 'Unable to add trusted nodes';
+    throw new Error(message);
+  }
+  return payload;
+}
+
+async function removeTrustedNode(node) {
+  try {
+    const resp = await fetch('/trusted_nodes/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node })
+    });
+    const payload = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const message = payload && payload.message ? payload.message : 'Error removing trusted node';
+      throw new Error(message);
+    }
+    alert(payload.message || 'Trusted node removed');
+    loadTrustedNodes();
+  } catch (err) {
+    alert("Error removing trusted node: " + err.message);
   }
 }
 
@@ -167,38 +276,71 @@ function checkNodeOnline(node, indicatorElement) {
     });
 }
 
+function parseNodeInput(raw) {
+  return raw
+    .split(',')
+    .map(item => item.trim())
+    .filter(item => item.length > 0);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const addNodesBtn = document.getElementById('addNodesBtn');
   const nodesInput  = document.getElementById('nodesInput');
+  const addTrustedNodesBtn = document.getElementById('addTrustedNodesBtn');
+  const trustedNodesInput = document.getElementById('trustedNodesInput');
 
-  addNodesBtn.addEventListener('click', () => {
+  addNodesBtn.addEventListener('click', async () => {
     const raw = nodesInput.value.trim();
     if (!raw) {
       alert("Please provide at least one IP:port");
       return;
     }
-    const arr = raw.split(',');
+    const arr = parseNodeInput(raw);
 
-    fetch('/nodes/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nodes: arr })
-    })
-    .then(r => {
-      if (!r.ok) throw new Error("Node register error");
-      return r.json();
-    })
-    .then(resp => {
-      alert(resp.message);
+    try {
+      const resp = await fetch('/nodes/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodes: arr })
+      });
+      const payload = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const message = payload && payload.message ? payload.message : 'Node register error';
+        throw new Error(message);
+      }
+      alert(payload.message || 'Nodes added');
       nodesInput.value = '';
       loadNodes();
-    })
-    .catch(e => {
-      alert("Error adding nodes: " + e);
-    });
+    } catch (e) {
+      alert("Error adding nodes: " + e.message);
+    }
+  });
+
+  addTrustedNodesBtn.addEventListener('click', async () => {
+    const raw = trustedNodesInput.value.trim();
+    if (!raw) {
+      alert("Please provide at least one trusted node");
+      return;
+    }
+
+    const nodes = parseNodeInput(raw);
+    if (nodes.length === 0) {
+      alert("Please provide at least one trusted node");
+      return;
+    }
+
+    try {
+      const resp = await addTrustedNodes(nodes);
+      alert(resp.message || 'Trusted nodes added');
+      trustedNodesInput.value = '';
+      loadTrustedNodes();
+    } catch (err) {
+      alert(err.message);
+    }
   });
 
   loadNodes();
+  loadTrustedNodes();
 });
 </script>
 </body>
