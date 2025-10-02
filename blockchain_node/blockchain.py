@@ -730,12 +730,10 @@ class Blockchain:
 
     def resolve_conflicts(self):
         replaced = False
-        original_pending_transactions = []
         with self._lock:
             current_length = len(self.chain)
             trusted_nodes = list(self.trusted_nodes)
             untrusted_nodes = [n for n in self.nodes if n not in self.trusted_nodes]
-            original_pending_transactions = list(self.transactions)
         best_chain = None
         best_length = current_length
 
@@ -762,24 +760,19 @@ class Blockchain:
                     if isinstance(tx, dict) and tx.get("tx_id")
                 }
                 self.chain = best_chain
+                current_pending = list(self.transactions)
                 removed_transactions = []
                 if chain_tx_ids:
-                    self.transactions = [
-                        tx
-                        for tx in self.transactions
-                        if not (
-                            isinstance(tx, dict)
-                            and tx.get("tx_id") in chain_tx_ids
-                        )
-                    ]
-                    removed_transactions = [
-                        tx
-                        for tx in original_pending_transactions
-                        if isinstance(tx, dict)
-                        and tx.get("tx_id") in chain_tx_ids
-                    ]
+                    filtered_transactions = []
+                    for tx in current_pending:
+                        tx_id = tx.get("tx_id") if isinstance(tx, dict) else None
+                        if tx_id and tx_id in chain_tx_ids:
+                            removed_transactions.append(tx)
+                        else:
+                            filtered_transactions.append(tx)
+                    self.transactions = filtered_transactions
                 else:
-                    self.transactions = list(self.transactions)
+                    self.transactions = current_pending
                 if removed_transactions:
                     seen_paths = set()
                     for tx in removed_transactions:

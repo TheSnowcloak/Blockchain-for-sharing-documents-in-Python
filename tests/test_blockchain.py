@@ -417,6 +417,64 @@ def test_resolve_conflicts_removes_pending_files(isolated_blockchain, monkeypatc
     assert not any(pending_dir.iterdir())
 
 
+def test_resolve_conflicts_removes_late_pending_upload(isolated_blockchain, monkeypatch):
+    bc, module = isolated_blockchain
+
+    pending_name = "late_pending.txt"
+    pending_path = Path(module.PENDING_FOLDER) / pending_name
+    pending_path.write_text("pending-bytes")
+
+    tx_id = "tx-late"
+    pending_tx = {
+        "tx_id": tx_id,
+        "sender": "sender",
+        "recipient": "recipient",
+        "file_name": pending_name,
+        "file_path": f"./pending_uploads/{pending_name}",
+        "alias": "",
+        "recipient_alias": "",
+        "is_sensitive": "0",
+        "stored_file_name": pending_name,
+    }
+
+    bc.nodes = {"peer-a:5000"}
+    bc.trusted_nodes = {"peer-a:5000"}
+
+    best_chain = list(bc.chain)
+    best_chain.append(
+        {
+            "index": len(bc.chain) + 1,
+            "timestamp": "now",
+            "transactions": [dict(pending_tx)],
+            "proof": 200,
+            "previous_hash": "hash",
+        }
+    )
+
+    appended = False
+
+    def fake_fetch(netloc):
+        nonlocal appended
+        assert netloc == "peer-a:5000"
+        if not appended:
+            bc.transactions.append(dict(pending_tx))
+            appended = True
+        return best_chain
+
+    monkeypatch.setattr(bc, "_fetch_chain_with_retry", fake_fetch)
+    monkeypatch.setattr(bc, "valid_chain", lambda chain: True)
+
+    sync_calls = []
+    monkeypatch.setattr(bc, "sync_files", lambda: sync_calls.append(True))
+
+    replaced = bc.resolve_conflicts()
+
+    assert replaced is True
+    assert not any(tx.get("tx_id") == tx_id for tx in bc.transactions)
+    assert not pending_path.exists()
+    assert sync_calls, "sync_files should still be invoked"
+
+
 def test_set_validator_identity_auto_trusts_netloc(isolated_blockchain):
     bc, module = isolated_blockchain
 
