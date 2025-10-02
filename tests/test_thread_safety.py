@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import uuid
 from pathlib import Path
 
@@ -154,6 +155,31 @@ class UploadConsensusHammerTest(unittest.TestCase):
             other_thread_acquired.is_set(),
             "Another thread could not obtain the blockchain lock during consensus",
         )
+
+    def test_fetch_chain_with_retry_handles_invalid_json(self):
+        blockchain = self.Blockchain()
+        blockchain.sync_max_retries = 3
+        blockchain.sync_backoff_initial = 0
+        blockchain.sync_backoff_multiplier = 1
+
+        fake_response = mock.Mock()
+        fake_response.status_code = 200
+        fake_response.json.side_effect = ValueError("not json")
+
+        with mock.patch(
+            "blockchain_node.blockchain.requests.get",
+            return_value=fake_response,
+        ) as mock_get, mock.patch.object(blockchain, "_record_sync_failure") as record_mock:
+            result = blockchain._fetch_chain_with_retry("peer.example:5000")
+
+        self.assertIsNone(result)
+        self.assertEqual(mock_get.call_count, blockchain.sync_max_retries)
+        self.assertEqual(record_mock.call_count, blockchain.sync_max_retries)
+        for attempt, call in enumerate(record_mock.call_args_list, start=1):
+            self.assertEqual(call.args[0], "chain")
+            self.assertEqual(call.args[1], "peer.example:5000")
+            self.assertEqual(call.kwargs.get("attempt"), attempt)
+            self.assertIsInstance(call.kwargs.get("error"), ValueError)
 
 
 if __name__ == "__main__":
