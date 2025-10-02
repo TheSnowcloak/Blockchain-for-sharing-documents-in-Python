@@ -580,7 +580,17 @@ class Blockchain:
             try:
                 response = requests.get(url, timeout=self.sync_chain_timeout)
                 if response.status_code == 200:
-                    return response.json().get("chain", [])
+                    try:
+                        payload = response.json()
+                    except (ValueError, json.JSONDecodeError) as exc:
+                        self._record_sync_failure(
+                            "chain",
+                            netloc,
+                            error=exc,
+                            attempt=attempt,
+                        )
+                        continue
+                    return payload.get("chain", [])
                 self._record_sync_failure("chain", netloc, error=f"HTTP {response.status_code}", attempt=attempt)
             except requests.exceptions.RequestException as exc:
                 self._record_sync_failure("chain", netloc, error=exc, attempt=attempt)
