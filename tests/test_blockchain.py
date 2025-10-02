@@ -399,3 +399,44 @@ def test_file_route_and_sync_use_stored_filename(isolated_blockchain, monkeypatc
 
     assert upload_path.exists()
     assert upload_path.read_bytes() == file_bytes
+
+
+def test_validator_key_rotation_preserves_signature_history(isolated_blockchain):
+    bc, module = isolated_blockchain
+
+    prev_hash = module.Blockchain.hash(bc.last_block)
+    block_one = bc.create_block(proof=111, previous_hash=prev_hash)
+    assert block_one["validator_signatures"], "Block should contain validator signatures"
+
+    first_signature = block_one["validator_signatures"][0]
+    original_key_id = first_signature.get("key_id")
+    assert original_key_id, "Signatures must include the originating key identifier"
+
+    original_keys = dict(bc.validator_public_keys[bc.validator_id])
+    assert original_key_id in original_keys
+
+    new_key = RSA.generate(1024)
+    new_private_hex = binascii.hexlify(new_key.export_key(format='DER')).decode('ascii')
+    new_public_hex = binascii.hexlify(new_key.publickey().export_key(format='DER')).decode('ascii')
+
+    bc.update_validator_public_key(bc.validator_id, new_public_hex)
+    bc.set_validator_identity(bc.validator_id, new_private_hex, public_key_hex=new_public_hex)
+
+    prev_hash = module.Blockchain.hash(bc.last_block)
+    block_two = bc.create_block(proof=222, previous_hash=prev_hash)
+    latest_signature = block_two["validator_signatures"][0]
+    rotated_key_id = latest_signature.get("key_id")
+
+    assert rotated_key_id and rotated_key_id != original_key_id
+
+    keys_after_rotation = dict(bc.validator_public_keys[bc.validator_id])
+    assert original_key_id in keys_after_rotation
+    assert rotated_key_id in keys_after_rotation
+
+    assert bc.verify_block_signatures(block_one)
+    assert bc.verify_block_signatures(block_two)
+
+    bc.validator_public_keys[bc.validator_id] = {original_key_id: keys_after_rotation[original_key_id]}
+
+    assert bc.verify_block_signatures(block_one)
+    assert not bc.verify_block_signatures(block_two)
