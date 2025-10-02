@@ -20,6 +20,7 @@ import requests
 import re
 import socket
 import ipaddress
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, request, render_template, send_from_directory, send_file, abort
 from flask_cors import CORS
@@ -137,22 +138,50 @@ def _coerce_node_entries(raw_value):
 ###################################
 # Utility to unify IP:port format
 ###################################
+_SCHEME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.-]*://')
+
+
+def _parse_netloc(address: str):
+    text = (address or "").strip()
+    if not text:
+        raise ValueError("Empty address")
+    if _SCHEME_RE.match(text):
+        parsed = urlsplit(text)
+    else:
+        parsed = urlsplit(f'//{text}')
+    if not parsed.hostname:
+        raise ValueError(f"Invalid address: {address!r}")
+    return parsed
+
+
+def _format_host_for_netloc(host: str) -> str:
+    host = host.strip()
+    if not host:
+        raise ValueError("Empty host")
+    if ':' in host and not host.startswith('['):
+        return f'[{host}]'
+    return host
+
+
+def _split_host_port(netloc: str):
+    try:
+        parsed = _parse_netloc(netloc)
+    except ValueError as exc:
+        raise ValueError(f"Invalid netloc: {netloc!r}") from exc
+    host = parsed.hostname
+    port = parsed.port
+    if host is None:
+        raise ValueError(f"Invalid netloc: {netloc!r}")
+    return host, port
+
+
 def normalize_netloc(address: str) -> str:
-    """
-    Removes 'http://' or 'https://', trailing '/',
-    and if no port is specified, adds ':5000'.
-    Example: 'http://11.222.33.44:5555/' -> '11.222.33.44:5555'
-    """
-    address = address.strip()
-    if address.startswith("http://"):
-        address = address[7:]
-    elif address.startswith("https://"):
-        address = address[8:]
-    if address.endswith("/"):
-        address = address[:-1]
-    if ":" not in address:
-        address += ":5000"
-    return address
+    """Normalize a user supplied address into ``host:port`` format."""
+
+    parsed = _parse_netloc(address)
+    host = parsed.hostname.strip()
+    port = parsed.port or 5000
+    return f"{_format_host_for_netloc(host)}:{port}"
 
 ##############################################
 # Encryption keys database (just for demonstration)
@@ -1094,7 +1123,10 @@ class Blockchain:
         return False
 
     def _clear_trusted_cache_entry(self, netloc):
-        host = netloc.split(":")[0]
+        try:
+            host, _ = _split_host_port(netloc)
+        except ValueError:
+            return
         self._trusted_resolution_cache.pop(host, None)
 
     def add_trusted_node(self, address):
@@ -1115,7 +1147,10 @@ class Blockchain:
         return False
 
     def get_trusted_netloc_ips(self, netloc):
-        host = netloc.split(":")[0]
+        try:
+            host, _ = _split_host_port(netloc)
+        except ValueError:
+            return ()
         with self._lock:
             cached = self._trusted_resolution_cache.get(host)
             if cached and cached.get("netloc") == netloc:
@@ -1132,15 +1167,19 @@ class Blockchain:
 
     @staticmethod
     def _resolve_host_to_ips(host):
+        stripped_host = host.strip()
+        if stripped_host.startswith('[') and stripped_host.endswith(']'):
+            stripped_host = stripped_host[1:-1]
+
         try:
-            ipaddress.ip_address(host)
+            ip_obj = ipaddress.ip_address(stripped_host)
         except ValueError:
             try:
-                _name, _alias, ip_list = socket.gethostbyname_ex(host)
+                _name, _alias, ip_list = socket.gethostbyname_ex(stripped_host)
             except (socket.gaierror, UnicodeError):
                 ip_list = []
         else:
-            ip_list = [host]
+            ip_list = [str(ip_obj)]
 
         deduped = []
         for item in ip_list:
@@ -1164,8 +1203,11 @@ def _request_from_trusted():
         trusted_entries = list(blockchain.trusted_nodes)
 
     for netloc in trusted_entries:
-        base_ip = netloc.split(":")[0]
-        if base_ip == caller_ip:
+        try:
+            host, _ = _split_host_port(netloc)
+        except ValueError:
+            continue
+        if host == caller_ip:
             return True
 
         resolved_ips = blockchain.get_trusted_netloc_ips(netloc)
