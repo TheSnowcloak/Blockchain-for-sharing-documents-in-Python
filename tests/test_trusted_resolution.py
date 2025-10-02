@@ -127,3 +127,58 @@ def test_ipv6_trusted_chain_returns_unpruned(isolated_app):
     untrusted_body = untrusted_response.get_json()
     assert len(untrusted_body["chain"][0]["transactions"]) == 1
     assert untrusted_body["chain"][0]["transactions"][0]["tx_id"] == "public"
+
+
+def test_untrusted_caller_blocked_from_trusted_management(isolated_app):
+    module = isolated_app
+    client = module.app.test_client()
+
+    response = client.post(
+        "/trusted_nodes/register",
+        json={"nodes": ["203.0.113.99:5000"]},
+        environ_base={"REMOTE_ADDR": "198.51.100.42"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["message"] == "Caller is not authorized to manage trusted nodes"
+
+    module.blockchain.add_trusted_node("198.51.100.10:5000")
+
+    removal = client.post(
+        "/trusted_nodes/remove",
+        json={"node": "203.0.113.99:5000"},
+        environ_base={"REMOTE_ADDR": "203.0.113.99"},
+    )
+
+    assert removal.status_code == 403
+    assert removal.get_json()["message"] == "Caller is not authorized to manage trusted nodes"
+
+
+def test_trusted_caller_can_manage_trusted_nodes(isolated_app):
+    module = isolated_app
+    blockchain = module.blockchain
+
+    trusted_admin = "192.0.2.15:5000"
+    blockchain.add_trusted_node(trusted_admin)
+
+    client = module.app.test_client()
+
+    registration = client.post(
+        "/trusted_nodes/register",
+        json={"nodes": ["203.0.113.200:5000"]},
+        environ_base={"REMOTE_ADDR": "192.0.2.15"},
+    )
+
+    assert registration.status_code == 201
+    assert "203.0.113.200:5000" in blockchain.trusted_nodes
+
+    blockchain.add_trusted_node("203.0.113.201:5000")
+
+    removal = client.post(
+        "/trusted_nodes/remove",
+        json={"node": "203.0.113.201:5000"},
+        environ_base={"REMOTE_ADDR": "192.0.2.15"},
+    )
+
+    assert removal.status_code == 200
+    assert "203.0.113.201:5000" not in blockchain.trusted_nodes

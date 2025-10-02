@@ -1803,6 +1803,8 @@ def get_nodes():
 
 @app.route('/trusted_nodes/register', methods=['POST'])
 def register_trusted_nodes():
+    if not _request_from_trusted():
+        return jsonify({"message": "Caller is not authorized to manage trusted nodes"}),403
     node_netlocs = []
 
     payload = request.get_json(silent=True)
@@ -1836,6 +1838,8 @@ def register_trusted_nodes():
 
 @app.route('/trusted_nodes/remove', methods=['POST'])
 def remove_trusted_node():
+    if not _request_from_trusted():
+        return jsonify({"message": "Caller is not authorized to manage trusted nodes"}),403
     d = request.get_json() or {}
     if 'node' not in d:
         return jsonify({"message":"Missing node address"}),400
