@@ -1411,16 +1411,14 @@ def get_trusted_nodes():
 
 @app.route('/nodes/resolve', methods=['GET'])
 def consensus():
-    with blockchain.lock:
-        replaced = blockchain.resolve_conflicts()
+    replaced = blockchain.resolve_conflicts()
     if replaced:
         return jsonify({"message":"Chain replaced"}),200
     return jsonify({"message":"Chain is authoritative"}),200
 
 @app.route('/sync', methods=['GET'])
 def manual_sync():
-    with blockchain.lock:
-        blockchain.sync_files()
+    blockchain.sync_files()
     return jsonify({"message":"sync done"}),200
 
 def auto_sync_conflicts(interval=10):
@@ -1430,8 +1428,7 @@ def auto_sync_conflicts(interval=10):
     """
     while True:
         time.sleep(interval)
-        with blockchain.lock:
-            replaced = blockchain.resolve_conflicts()
+        replaced = blockchain.resolve_conflicts()
         if replaced:
             logging.info("Chain replaced.")
         else:
