@@ -78,6 +78,35 @@ def client_index():
     """
     return render_template('client_index.html')
 
+def _resolve_wallet_key_size():
+    """Determine the RSA key size for new wallets."""
+    env_value = os.getenv('BLOCKCHAIN_CLIENT_RSA_KEY_SIZE')
+    default_bits = 2048
+
+    if env_value is None:
+        return default_bits
+
+    try:
+        bits = int(env_value)
+    except (TypeError, ValueError):
+        app.logger.warning(
+            "Invalid BLOCKCHAIN_CLIENT_RSA_KEY_SIZE value %r; using %d bits instead.",
+            env_value,
+            default_bits,
+        )
+        return default_bits
+
+    if bits < default_bits:
+        app.logger.warning(
+            "BLOCKCHAIN_CLIENT_RSA_KEY_SIZE=%d is below the supported minimum; using %d bits instead.",
+            bits,
+            default_bits,
+        )
+        return default_bits
+
+    return bits
+
+
 @app.route('/wallet/new', methods=['GET'])
 def new_wallet():
     """
@@ -85,7 +114,8 @@ def new_wallet():
     The keys are DER encoded, then hex-encoded for JSON.
     """
     rgen = Crypto.Random.new().read
-    priv = RSA.generate(1024, rgen)
+    key_size = _resolve_wallet_key_size()
+    priv = RSA.generate(key_size, rgen)
     pub  = priv.publickey()
     return jsonify({
         "private_key": binascii.hexlify(priv.exportKey(format='DER')).decode('ascii'),
