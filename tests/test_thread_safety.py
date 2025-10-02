@@ -113,6 +113,48 @@ class UploadConsensusHammerTest(unittest.TestCase):
             total_expected,
         )
 
+    def test_consensus_allows_other_threads_to_acquire_lock(self):
+        blockchain = self.Blockchain()
+        blockchain.add_node("127.0.0.1:5000")
+
+        fetch_started = threading.Event()
+        release_fetch = threading.Event()
+        other_thread_acquired = threading.Event()
+        original_fetch = blockchain._fetch_chain_with_retry
+
+        def slow_fetch(netloc):
+            fetch_started.set()
+            release_fetch.wait(timeout=1.0)
+            return []
+
+        blockchain._fetch_chain_with_retry = slow_fetch
+
+        try:
+            consensus_thread = threading.Thread(target=blockchain.resolve_conflicts)
+            consensus_thread.start()
+
+            self.assertTrue(fetch_started.wait(timeout=1.0), "Consensus did not reach fetch stage")
+
+            def competitor():
+                if blockchain.lock.acquire(timeout=0.5):
+                    other_thread_acquired.set()
+                    blockchain.lock.release()
+
+            competitor_thread = threading.Thread(target=competitor)
+            competitor_thread.start()
+            competitor_thread.join()
+
+            release_fetch.set()
+            consensus_thread.join(timeout=2.0)
+            self.assertFalse(consensus_thread.is_alive(), "Consensus thread did not finish")
+        finally:
+            blockchain._fetch_chain_with_retry = original_fetch
+
+        self.assertTrue(
+            other_thread_acquired.is_set(),
+            "Another thread could not obtain the blockchain lock during consensus",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
