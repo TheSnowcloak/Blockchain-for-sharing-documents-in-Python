@@ -86,3 +86,44 @@ def test_ipv6_bracketed_trusted_registration(isolated_app):
 
     assert response.status_code == 200
     assert "::1" in blockchain.get_trusted_netloc_ips("[::1]:5000")
+
+
+def test_ipv6_trusted_chain_returns_unpruned(isolated_app):
+    module = isolated_app
+    blockchain = module.blockchain
+
+    blockchain.add_trusted_node("[::1]:5000")
+
+    with blockchain.lock:
+        blockchain.chain = [
+            {
+                "index": 1,
+                "timestamp": "2024-01-01T00:00:00",
+                "transactions": [
+                    {"tx_id": "sensitive", "is_sensitive": "1"},
+                    {"tx_id": "public", "is_sensitive": "0"},
+                ],
+                "proof": 100,
+                "previous_hash": "1",
+            }
+        ]
+
+    client = module.app.test_client()
+
+    trusted_response = client.get(
+        "/chain",
+        environ_base={"REMOTE_ADDR": "::1"},
+    )
+    assert trusted_response.status_code == 200
+    trusted_body = trusted_response.get_json()
+    assert trusted_body["chain"][0]["transactions"][0]["tx_id"] == "sensitive"
+    assert len(trusted_body["chain"][0]["transactions"]) == 2
+
+    untrusted_response = client.get(
+        "/chain",
+        environ_base={"REMOTE_ADDR": "203.0.113.5"},
+    )
+    assert untrusted_response.status_code == 200
+    untrusted_body = untrusted_response.get_json()
+    assert len(untrusted_body["chain"][0]["transactions"]) == 1
+    assert untrusted_body["chain"][0]["transactions"][0]["tx_id"] == "public"

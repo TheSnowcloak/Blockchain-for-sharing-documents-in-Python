@@ -1442,7 +1442,14 @@ def get_chain():
         trusted_snapshot = list(blockchain.trusted_nodes)
         chain_snapshot = copy.deepcopy(blockchain.chain)
 
-    is_trusted = any(netloc.split(":")[0] == caller_ip for netloc in trusted_snapshot)
+    def _trusted_host_matches_ip(netloc: str, ip: str) -> bool:
+        try:
+            host, _ = _split_host_port(netloc)
+        except ValueError:
+            return False
+        return host == ip
+
+    is_trusted = any(_trusted_host_matches_ip(netloc, caller_ip) for netloc in trusted_snapshot)
 
     pruned_chain = []
     for block in chain_snapshot:
