@@ -70,11 +70,13 @@ After at least one node is running (see **Start the node** above), use the follo
      -d '{"nodes": ["http://192.168.1.21:5000", "http://localhost:5001"]}'
    ```
    ```bat
-   :: Windows CMD or PowerShell
-   curl.exe -X POST http://127.0.0.1:5000/nodes/register ^
-     -H "Content-Type: application/json" ^
-     -d "{\"nodes\": [\"http://192.168.1.21:5000\", \"http://localhost:5001\"]}"
+   :: Windows CMD or PowerShell (single line prevents escaping issues)
+   curl.exe -X POST "http://127.0.0.1:5000/nodes/register" -H "Content-Type: application/json" -d "{\"nodes\": [\"http://192.168.1.21:5000\", \"http://localhost:5001\"]}"
    ```
+   > **PowerShell tip:** If `curl` maps to `Invoke-WebRequest`, call the executable explicitly via `& curl.exe ...`. Alternatively you can run:
+   > ```powershell
+   > Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5000/nodes/register" -ContentType "application/json" -Body (@{ nodes = @("http://192.168.1.21:5000", "http://localhost:5001") } | ConvertTo-Json)
+   > ```
 3. Inspect the response to confirm the new node appears under `total_nodes`.
 
 #### Remove nodes and verify state
@@ -87,9 +89,7 @@ After at least one node is running (see **Start the node** above), use the follo
   ```
   ```bat
   :: Windows CMD or PowerShell
-  curl.exe -X POST http://127.0.0.1:5000/nodes/remove ^
-    -H "Content-Type: application/json" ^
-    -d "{\"node\": \"http://127.0.0.1:5001\"}"
+  curl.exe -X POST "http://127.0.0.1:5000/nodes/remove" -H "Content-Type: application/json" -d "{\"node\": \"http://127.0.0.1:5001\"}"
   ```
 - Retrieve the current node list:
   ```sh
@@ -116,9 +116,8 @@ Trusted nodes can access sensitive data and participate in Proof-of-Authority (P
      -d '{"nodes": ["http://127.0.0.1:5001"]}'
    ```
    ```bat
-   curl.exe -X POST http://127.0.0.1:5000/trusted_nodes/register ^
-     -H "Content-Type: application/json" ^
-     -d "{\"nodes\": [\"http://127.0.0.1:5001\"]}"
+   :: Windows CMD or PowerShell
+   curl.exe -X POST "http://127.0.0.1:5000/trusted_nodes/register" -H "Content-Type: application/json" -d "{\"nodes\": [\"http://127.0.0.1:5001\"]}"
    ```
 2. Remove a trusted node:
    ```sh
@@ -127,9 +126,8 @@ Trusted nodes can access sensitive data and participate in Proof-of-Authority (P
      -d '{"node": "http://127.0.0.1:5001"}'
    ```
    ```bat
-   curl.exe -X POST http://127.0.0.1:5000/trusted_nodes/remove ^
-     -H "Content-Type: application/json" ^
-     -d "{\"node\": \"http://127.0.0.1:5001\"}"
+   :: Windows CMD or PowerShell
+   curl.exe -X POST "http://127.0.0.1:5000/trusted_nodes/remove" -H "Content-Type: application/json" -d "{\"node\": \"http://127.0.0.1:5001\"}"
    ```
 3. Check the trusted list:
    ```sh
@@ -279,11 +277,13 @@ Jakmile máte spuštěný alespoň jeden uzel (viz **Spuštění uzlu**), může
      -d '{"nodes": ["http://192.168.1.21:5000", "http://localhost:5001"]}'
    ```
    ```bat
-   :: Windows CMD nebo PowerShell
-   curl.exe -X POST http://127.0.0.1:5000/nodes/register ^
-     -H "Content-Type: application/json" ^
-     -d "{\"nodes\": [\"http://192.168.1.21:5000\", \"http://localhost:5001\"]}"
+   :: Windows CMD nebo PowerShell (jednořádkový příkaz eliminuje chyby s escapováním)
+   curl.exe -X POST "http://127.0.0.1:5000/nodes/register" -H "Content-Type: application/json" -d "{\"nodes\": [\"http://192.168.1.21:5000\", \"http://localhost:5001\"]}"
    ```
+   > **Tip pro PowerShell:** Pokud `curl` odkazuje na `Invoke-WebRequest`, spusťte přímo spustitelný soubor pomocí `& curl.exe ...`. Alternativně můžete využít:
+   > ```powershell
+   > Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5000/nodes/register" -ContentType "application/json" -Body (@{ nodes = @("http://192.168.1.21:5000", "http://localhost:5001") } | ConvertTo-Json)
+   > ```
 3. V odpovědi zkontrolujte, že se nový uzel objevil pod klíčem `total_nodes`.
 
 #### Odstranění uzlů a ověření stavu
@@ -296,9 +296,7 @@ Jakmile máte spuštěný alespoň jeden uzel (viz **Spuštění uzlu**), může
   ```
   ```bat
   :: Windows CMD nebo PowerShell
-  curl.exe -X POST http://127.0.0.1:5000/nodes/remove ^
-    -H "Content-Type: application/json" ^
-    -d "{\"node\": \"http://127.0.0.1:5001\"}"
+  curl.exe -X POST "http://127.0.0.1:5000/nodes/remove" -H "Content-Type: application/json" -d "{\"node\": \"http://127.0.0.1:5001\"}"
   ```
 - Získání aktuálního seznamu uzlů:
   ```sh
@@ -325,9 +323,8 @@ Trusted uzly mají přístup k citlivým datům a podílejí se na konsenzu Proo
      -d '{"nodes": ["http://127.0.0.1:5001"]}'
    ```
    ```bat
-   curl.exe -X POST http://127.0.0.1:5000/trusted_nodes/register ^
-     -H "Content-Type: application/json" ^
-     -d "{\"nodes\": [\"http://127.0.0.1:5001\"]}"
+   :: Windows CMD nebo PowerShell
+   curl.exe -X POST "http://127.0.0.1:5000/trusted_nodes/register" -H "Content-Type: application/json" -d "{\"nodes\": [\"http://127.0.0.1:5001\"]}"
    ```
 2. Odebrání trusted uzlu:
    ```sh
@@ -336,9 +333,8 @@ Trusted uzly mají přístup k citlivým datům a podílejí se na konsenzu Proo
      -d '{"node": "http://127.0.0.1:5001"}'
    ```
    ```bat
-   curl.exe -X POST http://127.0.0.1:5000/trusted_nodes/remove ^
-     -H "Content-Type: application/json" ^
-     -d "{\"node\": \"http://127.0.0.1:5001\"}"
+   :: Windows CMD nebo PowerShell
+   curl.exe -X POST "http://127.0.0.1:5000/trusted_nodes/remove" -H "Content-Type: application/json" -d "{\"node\": \"http://127.0.0.1:5001\"}"
    ```
 3. Kontrola trusted seznamu:
    ```sh
