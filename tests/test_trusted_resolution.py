@@ -133,6 +133,8 @@ def test_untrusted_caller_blocked_from_trusted_management(isolated_app):
     module = isolated_app
     client = module.app.test_client()
 
+    forbidden_message = module._TRUSTED_MANAGEMENT_FORBIDDEN_MESSAGE
+
     response = client.post(
         "/trusted_nodes/register",
         json={"nodes": ["203.0.113.99:5000"]},
@@ -140,7 +142,7 @@ def test_untrusted_caller_blocked_from_trusted_management(isolated_app):
     )
 
     assert response.status_code == 403
-    assert response.get_json()["message"] == "Caller is not authorized to manage trusted nodes"
+    assert response.get_json()["message"] == forbidden_message
 
     module.blockchain.add_trusted_node("198.51.100.10:5000")
 
@@ -151,7 +153,7 @@ def test_untrusted_caller_blocked_from_trusted_management(isolated_app):
     )
 
     assert removal.status_code == 403
-    assert removal.get_json()["message"] == "Caller is not authorized to manage trusted nodes"
+    assert removal.get_json()["message"] == forbidden_message
 
 
 def test_trusted_caller_can_manage_trusted_nodes(isolated_app):
