@@ -18,6 +18,8 @@ import time
 import threading
 import requests
 import re
+import socket
+import ipaddress
 
 from flask import Flask, jsonify, request, render_template, send_from_directory, send_file, abort
 from flask_cors import CORS
@@ -198,6 +200,7 @@ class Blockchain:
         self.chain = []
         self.nodes = set()
         self.trusted_nodes = set()
+        self._trusted_resolution_cache = {}
         self.sync_chain_timeout = SYNC_CHAIN_TIMEOUT
         self.sync_download_timeout = SYNC_DOWNLOAD_TIMEOUT
         self.sync_max_retries = max(1, SYNC_MAX_RETRIES)
@@ -932,6 +935,7 @@ class Blockchain:
             self.transactions = data.get("transactions", [])
             self.nodes = {normalize_netloc(item) for item in data.get("nodes", [])}
             self.trusted_nodes = {normalize_netloc(item) for item in data.get("trusted_nodes", [])}
+            self._trusted_resolution_cache.clear()
             self.validator_public_keys = data.get("validator_public_keys", self.validator_public_keys)
             self.quorum_threshold = data.get("quorum_threshold", self.quorum_threshold)
 
@@ -950,10 +954,15 @@ class Blockchain:
                 return True
         return False
 
+    def _clear_trusted_cache_entry(self, netloc):
+        host = netloc.split(":")[0]
+        self._trusted_resolution_cache.pop(host, None)
+
     def add_trusted_node(self, address):
         with self._lock:
             normalized = normalize_netloc(address)
             self.trusted_nodes.add(normalized)
+            self._clear_trusted_cache_entry(normalized)
             self.save_data()
 
     def remove_trusted_node(self, address):
@@ -961,9 +970,44 @@ class Blockchain:
         with self._lock:
             if normalized in self.trusted_nodes:
                 self.trusted_nodes.remove(normalized)
+                self._clear_trusted_cache_entry(normalized)
                 self.save_data()
                 return True
         return False
+
+    def get_trusted_netloc_ips(self, netloc):
+        host = netloc.split(":")[0]
+        with self._lock:
+            cached = self._trusted_resolution_cache.get(host)
+            if cached and cached.get("netloc") == netloc:
+                return cached.get("ips", ())
+
+        ips = self._resolve_host_to_ips(host)
+
+        with self._lock:
+            self._trusted_resolution_cache[host] = {
+                "netloc": netloc,
+                "ips": ips,
+            }
+        return ips
+
+    @staticmethod
+    def _resolve_host_to_ips(host):
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            try:
+                _name, _alias, ip_list = socket.gethostbyname_ex(host)
+            except (socket.gaierror, UnicodeError):
+                ip_list = []
+        else:
+            ip_list = [host]
+
+        deduped = []
+        for item in ip_list:
+            if item not in deduped:
+                deduped.append(item)
+        return tuple(deduped)
 
 # Create the global Blockchain instance
 blockchain = Blockchain()
@@ -974,9 +1018,19 @@ app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 
 def _request_from_trusted():
     caller_ip = request.remote_addr
-    for netloc in blockchain.trusted_nodes:
+    if not caller_ip:
+        return False
+
+    with blockchain.lock:
+        trusted_entries = list(blockchain.trusted_nodes)
+
+    for netloc in trusted_entries:
         base_ip = netloc.split(":")[0]
         if base_ip == caller_ip:
+            return True
+
+        resolved_ips = blockchain.get_trusted_netloc_ips(netloc)
+        if caller_ip in resolved_ips:
             return True
     return False
 
