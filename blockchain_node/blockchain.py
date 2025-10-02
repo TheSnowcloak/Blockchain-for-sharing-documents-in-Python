@@ -713,10 +713,12 @@ class Blockchain:
 
     def resolve_conflicts(self):
         replaced = False
+        original_pending_transactions = []
         with self._lock:
             current_length = len(self.chain)
             trusted_nodes = list(self.trusted_nodes)
             untrusted_nodes = [n for n in self.nodes if n not in self.trusted_nodes]
+            original_pending_transactions = list(self.transactions)
         best_chain = None
         best_length = current_length
 
@@ -743,6 +745,7 @@ class Blockchain:
                     if isinstance(tx, dict) and tx.get("tx_id")
                 }
                 self.chain = best_chain
+                removed_transactions = []
                 if chain_tx_ids:
                     self.transactions = [
                         tx
@@ -752,8 +755,40 @@ class Blockchain:
                             and tx.get("tx_id") in chain_tx_ids
                         )
                     ]
+                    removed_transactions = [
+                        tx
+                        for tx in original_pending_transactions
+                        if isinstance(tx, dict)
+                        and tx.get("tx_id") in chain_tx_ids
+                    ]
                 else:
                     self.transactions = list(self.transactions)
+                if removed_transactions:
+                    seen_paths = set()
+                    for tx in removed_transactions:
+                        file_path_value = tx.get("file_path")
+                        if isinstance(file_path_value, str) and _is_safe_subpath(file_path_value, PENDING_FOLDER):
+                            normalized = os.path.normpath(file_path_value)
+                            candidate = os.path.join(".", normalized.lstrip("./"))
+                            seen_paths.add(os.path.abspath(candidate))
+                        stored_name = tx.get("stored_file_name")
+                        if isinstance(stored_name, str) and stored_name:
+                            normalized_name = os.path.normpath(stored_name)
+                            if not normalized_name.startswith(".."):
+                                candidate_rel = os.path.join(PENDING_FOLDER, normalized_name)
+                                if _is_safe_subpath(candidate_rel, PENDING_FOLDER):
+                                    candidate = os.path.join(
+                                        ".",
+                                        os.path.normpath(candidate_rel).lstrip("./"),
+                                    )
+                                    seen_paths.add(os.path.abspath(candidate))
+                    for path in seen_paths:
+                        try:
+                            os.remove(path)
+                        except FileNotFoundError:
+                            continue
+                        except OSError:
+                            logging.warning("Failed to remove pending file %s", path, exc_info=True)
                 self.save_data()
             self.sync_files()
             replaced = True

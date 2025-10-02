@@ -344,6 +344,79 @@ def test_resolve_conflicts_clears_pending_transactions(isolated_blockchain, monk
     assert saved_states == [[]]
 
 
+def test_resolve_conflicts_removes_pending_files(isolated_blockchain, monkeypatch):
+    bc, module = isolated_blockchain
+
+    genesis_block = {
+        "index": 1,
+        "timestamp": "now",
+        "transactions": [],
+        "proof": 100,
+        "previous_hash": "0",
+    }
+    bc.chain = [genesis_block]
+
+    stored_basename = "pending_doc.txt"
+    pending_rel = os.path.join(module.PENDING_FOLDER, stored_basename)
+    pending_path = Path(pending_rel)
+    pending_path.write_bytes(b"pending-bytes")
+
+    pending_tx = {
+        "tx_id": "tx-pending",
+        "sender": "sender",
+        "recipient": "recipient",
+        "file_name": "doc.txt",
+        "file_path": pending_rel,
+        "stored_file_name": stored_basename,
+        "alias": "",
+        "recipient_alias": "",
+        "is_sensitive": "0",
+        "file_owner": "peer-a:5000",
+    }
+    bc.transactions = [dict(pending_tx)]
+
+    uploaded_path = Path(module.UPLOAD_FOLDER) / stored_basename
+    uploaded_path.write_bytes(b"uploaded-bytes")
+
+    chain_tx = dict(pending_tx)
+    chain_tx["file_path"] = os.path.join(module.UPLOAD_FOLDER, stored_basename)
+
+    best_chain = [
+        genesis_block,
+        {
+            "index": 2,
+            "timestamp": "later",
+            "transactions": [chain_tx],
+            "proof": 200,
+            "previous_hash": "hash-1",
+        },
+    ]
+
+    bc.trusted_nodes = {"peer-a:5000"}
+
+    monkeypatch.setattr(bc, "_fetch_chain_with_retry", lambda netloc: best_chain)
+    monkeypatch.setattr(bc, "valid_chain", lambda chain: True)
+
+    sync_called = {}
+
+    def fake_sync():
+        sync_called["called"] = True
+        assert uploaded_path.exists()
+        assert not pending_path.exists()
+
+    monkeypatch.setattr(bc, "sync_files", fake_sync)
+
+    replaced = bc.resolve_conflicts()
+
+    assert replaced is True
+    assert bc.chain == best_chain
+    assert bc.transactions == []
+    assert sync_called == {"called": True}
+    pending_dir = Path(module.PENDING_FOLDER)
+    assert pending_dir.exists()
+    assert not any(pending_dir.iterdir())
+
+
 def test_set_validator_identity_auto_trusts_netloc(isolated_blockchain):
     bc, module = isolated_blockchain
 
