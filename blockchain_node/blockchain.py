@@ -39,6 +39,7 @@ CORS(app)
 
 DATA_FILE       = 'blockchain_data.json'
 KEYS_DB_FILE    = 'keys_db.json'      # store encryption keys for demonstration
+_keys_db_lock = threading.RLock()
 VALIDATOR_IDENTITY_FILE = 'validator_identity.json'
 MINING_SENDER   = "THE BLOCKCHAIN"
 
@@ -156,33 +157,47 @@ def normalize_netloc(address: str) -> str:
 ##############################################
 # Encryption keys database (just for demonstration)
 ##############################################
-def load_keys_db():
+def _load_keys_db_unlocked():
     if os.path.exists(KEYS_DB_FILE):
         with open(KEYS_DB_FILE,'r',encoding='utf-8') as f:
             return json.load(f)
     return {}
 
-def save_keys_db(keys_dict):
+
+def _save_keys_db_unlocked(keys_dict):
     with open(KEYS_DB_FILE,'w',encoding='utf-8') as f:
         json.dump(keys_dict, f, indent=2)
 
+
+def load_keys_db():
+    with _keys_db_lock:
+        return _load_keys_db_unlocked()
+
+
+def save_keys_db(keys_dict):
+    with _keys_db_lock:
+        _save_keys_db_unlocked(keys_dict)
+
+
 def store_encryption_keys(tx_id, key_b64, nonce_b64, tag_b64):
-    db = load_keys_db()
-    db[tx_id] = {
-        "enc_key_b64":   key_b64,
-        "enc_nonce_b64": nonce_b64,
-        "enc_tag_b64":   tag_b64
-    }
-    save_keys_db(db)
+    with _keys_db_lock:
+        db = _load_keys_db_unlocked()
+        db[tx_id] = {
+            "enc_key_b64":   key_b64,
+            "enc_nonce_b64": nonce_b64,
+            "enc_tag_b64":   tag_b64
+        }
+        _save_keys_db_unlocked(db)
 
 
 def delete_encryption_keys(tx_id):
-    db = load_keys_db()
-    if tx_id in db:
-        del db[tx_id]
-        save_keys_db(db)
-        return True
-    return False
+    with _keys_db_lock:
+        db = _load_keys_db_unlocked()
+        if tx_id in db:
+            del db[tx_id]
+            _save_keys_db_unlocked(db)
+            return True
+        return False
 
 
 def get_encryption_keys(tx_id):
