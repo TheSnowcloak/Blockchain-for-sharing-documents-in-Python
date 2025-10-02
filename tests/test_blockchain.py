@@ -200,6 +200,26 @@ def test_sync_files_skips_owner_when_local_node(isolated_blockchain, monkeypatch
     assert scheduled == [("peer-b:5000", 1)]
 
 
+def test_set_validator_identity_auto_trusts_netloc(isolated_blockchain):
+    bc, module = isolated_blockchain
+
+    rsa_key = RSA.generate(1024)
+    private_key_hex = binascii.hexlify(rsa_key.export_key(format='DER')).decode('ascii')
+    public_key_hex = binascii.hexlify(rsa_key.publickey().export_key(format='DER')).decode('ascii')
+
+    bc.trusted_nodes = set()
+
+    bc.set_validator_identity(
+        "validator-with-netloc",
+        private_key_hex,
+        netloc="https://validator-host:7000/",
+        public_key_hex=public_key_hex,
+    )
+
+    assert "validator-host:7000" in bc.trusted_nodes
+    assert bc.is_authorized_validator()
+
+
 def test_sync_files_rejects_paths_outside_uploads(isolated_blockchain, monkeypatch, tmp_path):
     bc, module = isolated_blockchain
 

@@ -712,7 +712,10 @@ class Blockchain:
         self.validator_id = validator_id
         self.validator_private_key_hex = private_key_hex
         if netloc:
-            self.validator_netloc = normalize_netloc(netloc)
+            normalized_netloc = normalize_netloc(netloc)
+            self.validator_netloc = normalized_netloc
+            if normalized_netloc not in self.trusted_nodes:
+                self.add_trusted_node(normalized_netloc)
 
         if public_key_hex:
             self.validator_public_key_hex = public_key_hex
