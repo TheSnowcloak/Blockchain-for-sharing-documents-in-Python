@@ -30,6 +30,7 @@ def isolated_blockchain(tmp_path, monkeypatch):
     os.makedirs(blockchain_module.UPLOAD_FOLDER, exist_ok=True)
 
     bc = blockchain_module.Blockchain()
+    blockchain_module.blockchain = bc
     bc.transactions = []
     bc.nodes = set()
     bc.trusted_nodes = set()
@@ -66,6 +67,7 @@ def test_create_block_normalizes_missing_file(isolated_blockchain):
     tx = block["transactions"][0]
     assert tx["file_path"] == "./uploads/doc.txt"
     assert tx["file_owner"] == "127.0.0.1:5000"
+    assert tx["stored_file_name"] == "doc.txt"
 
 
 def test_sync_files_downloads_from_recorded_owner(isolated_blockchain, monkeypatch):
@@ -196,3 +198,75 @@ def test_sync_files_skips_owner_when_local_node(isolated_blockchain, monkeypatch
     assert not downloaded.exists(), "File should not have been downloaded"
     assert "http://owner-host:6001/file/shared.txt" not in calls
     assert scheduled == [("peer-b:5000", 1)]
+
+
+def test_file_route_and_sync_use_stored_filename(isolated_blockchain, monkeypatch):
+    bc, module = isolated_blockchain
+
+    file_bytes = b"stored-file"
+    stored_basename = "stored_report.txt"
+    pending_rel = os.path.join(module.PENDING_FOLDER, stored_basename)
+    os.makedirs(os.path.dirname(pending_rel), exist_ok=True)
+    with open(pending_rel, "wb") as handle:
+        handle.write(file_bytes)
+
+    bc.add_transaction(
+        tx_id="tx-stored",
+        sender=module.MINING_SENDER,
+        recipient="recipient",
+        file_name="report.txt",
+        file_path=pending_rel,
+        alias="",
+        recipient_alias="",
+        signature="",
+        is_sensitive="0",
+        file_owner="peer-a:5000",
+        stored_file_name=stored_basename,
+    )
+
+    block = bc.create_block(proof=200, previous_hash="hash")
+    tx = block["transactions"][0]
+    stored_name = tx["stored_file_name"]
+
+    upload_path = Path(module.UPLOAD_FOLDER) / stored_name
+    assert upload_path.exists()
+    assert upload_path.read_bytes() == file_bytes
+
+    client = module.app.test_client()
+    response = client.get(f"/file/{stored_name}")
+    assert response.status_code == 200
+    assert response.data == file_bytes
+
+    upload_path.unlink()
+    assert not upload_path.exists()
+
+    block_module_chain = list(bc.chain)
+    bc.nodes = {"peer-a:5000"}
+
+    class DummyResponse:
+        def __init__(self, status, json_data=None, content=b""):
+            self.status_code = status
+            self._json = json_data
+            self._content = content
+
+        def json(self):
+            if self._json is None:
+                raise ValueError("No JSON body")
+            return self._json
+
+        def iter_content(self, chunk_size):
+            yield self._content
+
+    def fake_get(url, *args, **kwargs):
+        if url == "http://peer-a:5000/chain":
+            return DummyResponse(200, {"chain": block_module_chain})
+        if url == f"http://peer-a:5000/file/{stored_name}":
+            return DummyResponse(200, content=file_bytes)
+        raise AssertionError(f"Unexpected URL requested: {url}")
+
+    monkeypatch.setattr(module.requests, "get", fake_get)
+
+    bc.sync_files()
+
+    assert upload_path.exists()
+    assert upload_path.read_bytes() == file_bytes

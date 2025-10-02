@@ -181,8 +181,10 @@ function renderTxRow(blockIndex, blockTimestamp, tx) {
   if (tx.is_sensitive === "1") {
     fileCell = `<span style="color:red;">(SENSITIVE - hidden)</span>`;
   } else {
-    if (tx.file_name) {
-      fileCell = `<span class="file-link" data-file="${tx.file_name}">${tx.file_name}</span>`;
+    const storedName = tx.stored_file_name || tx.file_name;
+    const displayName = tx.file_name || storedName || "";
+    if (storedName) {
+      fileCell = `<span class="file-link" data-file="${storedName}">${displayName}</span>`;
     }
   }
 
@@ -244,6 +246,7 @@ function matchesTransaction(tx, searchText) {
     ${tx.sender}
     ${tx.recipient}
     ${tx.file_name}
+    ${tx.stored_file_name}
     ${tx.alias}
     ${tx.recipient_alias}
     ${tx.blockTimestamp}
@@ -283,7 +286,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (evt.target.classList.contains('file-link')) {
       const fname = evt.target.getAttribute('data-file');
       if (fname) {
-        window.open(nodeUrl + "/file/" + fname, "_blank");
+        window.open(nodeUrl + "/file/" + encodeURIComponent(fname), "_blank");
       }
     }
   });
