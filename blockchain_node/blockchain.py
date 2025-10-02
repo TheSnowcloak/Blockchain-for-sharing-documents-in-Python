@@ -603,7 +603,25 @@ class Blockchain:
 
         if best_chain is not None:
             with self._lock:
+                chain_tx_ids = {
+                    tx.get("tx_id")
+                    for block in best_chain
+                    if isinstance(block, dict)
+                    for tx in block.get("transactions", [])
+                    if isinstance(tx, dict) and tx.get("tx_id")
+                }
                 self.chain = best_chain
+                if chain_tx_ids:
+                    self.transactions = [
+                        tx
+                        for tx in self.transactions
+                        if not (
+                            isinstance(tx, dict)
+                            and tx.get("tx_id") in chain_tx_ids
+                        )
+                    ]
+                else:
+                    self.transactions = list(self.transactions)
                 self.save_data()
             self.sync_files()
             replaced = True

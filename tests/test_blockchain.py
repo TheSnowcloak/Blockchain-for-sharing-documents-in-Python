@@ -200,6 +200,54 @@ def test_sync_files_skips_owner_when_local_node(isolated_blockchain, monkeypatch
     assert scheduled == [("peer-b:5000", 1)]
 
 
+def test_resolve_conflicts_clears_pending_transactions(isolated_blockchain, monkeypatch):
+    bc, module = isolated_blockchain
+
+    genesis_block = {
+        "index": 1,
+        "timestamp": "now",
+        "transactions": [],
+        "proof": 100,
+        "previous_hash": "0",
+    }
+    bc.chain = [genesis_block]
+
+    pending_transactions = [
+        {"tx_id": "tx-1", "payload": "data-1"},
+        {"tx_id": "tx-2", "payload": "data-2"},
+    ]
+    bc.transactions = list(pending_transactions)
+
+    new_block = {
+        "index": 2,
+        "timestamp": "later",
+        "transactions": pending_transactions,
+        "proof": 200,
+        "previous_hash": "hash-1",
+    }
+    best_chain = [genesis_block, new_block]
+
+    bc.trusted_nodes = {"peer-a:5000"}
+
+    monkeypatch.setattr(bc, "_fetch_chain_with_retry", lambda netloc: best_chain)
+    monkeypatch.setattr(bc, "valid_chain", lambda chain: True)
+
+    saved_states = []
+
+    def fake_save_data():
+        saved_states.append(list(bc.transactions))
+
+    monkeypatch.setattr(bc, "save_data", fake_save_data)
+    monkeypatch.setattr(bc, "sync_files", lambda: None)
+
+    replaced = bc.resolve_conflicts()
+
+    assert replaced is True
+    assert bc.chain == best_chain
+    assert bc.transactions == []
+    assert saved_states == [[]]
+
+
 def test_set_validator_identity_auto_trusts_netloc(isolated_blockchain):
     bc, module = isolated_blockchain
 
