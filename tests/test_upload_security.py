@@ -14,6 +14,10 @@ class UploadSecurityTestCase(unittest.TestCase):
         self.client = node_module.app.test_client()
         node_module.blockchain.transactions = []
         self._original_validator_netloc = node_module.blockchain.validator_netloc
+        self._original_local_netlocs = node_module.app.config.get('LOCAL_NODE_NETLOCS')
+        self._original_env_local_netlocs = os.environ.get('LOCAL_NODE_NETLOCS')
+        node_module.app.config['LOCAL_NODE_NETLOCS'] = 'localhost:5000'
+        os.environ['LOCAL_NODE_NETLOCS'] = 'localhost:5000'
         self._created_paths = []
         self._keys_db_backup = None
         for folder in (node_module.PENDING_FOLDER, node_module.UPLOAD_FOLDER):
@@ -39,6 +43,14 @@ class UploadSecurityTestCase(unittest.TestCase):
                 pass
         node_module.blockchain.transactions = []
         node_module.blockchain.validator_netloc = self._original_validator_netloc
+        if self._original_local_netlocs is None:
+            node_module.app.config.pop('LOCAL_NODE_NETLOCS', None)
+        else:
+            node_module.app.config['LOCAL_NODE_NETLOCS'] = self._original_local_netlocs
+        if self._original_env_local_netlocs is None:
+            os.environ.pop('LOCAL_NODE_NETLOCS', None)
+        else:
+            os.environ['LOCAL_NODE_NETLOCS'] = self._original_env_local_netlocs
         if os.path.exists(node_module.KEYS_DB_FILE):
             os.remove(node_module.KEYS_DB_FILE)
         if self._keys_db_backup is not None:
@@ -261,6 +273,59 @@ class UploadSecurityTestCase(unittest.TestCase):
         pending_abs = os.path.abspath(os.path.join('.', tx['file_path'].lstrip('./')))
         if os.path.exists(pending_abs):
             self._created_paths.append(pending_abs)
+
+    def test_host_header_matching_client_ip_requires_configuration(self):
+        client_ip = '198.51.100.25'
+
+        original_config_present = 'LOCAL_NODE_NETLOCS' in node_module.app.config
+        original_config_value = node_module.app.config.get('LOCAL_NODE_NETLOCS')
+
+        def restore_config():
+            if original_config_present:
+                node_module.app.config['LOCAL_NODE_NETLOCS'] = original_config_value
+            else:
+                node_module.app.config.pop('LOCAL_NODE_NETLOCS', None)
+
+        self.addCleanup(restore_config)
+        node_module.app.config.pop('LOCAL_NODE_NETLOCS', None)
+
+        original_env_value = os.environ.pop('LOCAL_NODE_NETLOCS', None)
+
+        def restore_env():
+            if original_env_value is None:
+                os.environ.pop('LOCAL_NODE_NETLOCS', None)
+            else:
+                os.environ['LOCAL_NODE_NETLOCS'] = original_env_value
+
+        self.addCleanup(restore_env)
+
+        node_module.blockchain.validator_netloc = ''
+
+        base_data = {
+            'sender': node_module.MINING_SENDER,
+            'recipient': 'recipient',
+            'signature': '',
+            'tx_id': uuid.uuid4().hex,
+            'alias': '',
+            'recipient_alias': '',
+            'is_sensitive': '0',
+            'file_name': 'document.txt',
+            'file_path': './pending_uploads/ignored.txt',
+        }
+
+        response = self.client.post(
+            '/node/upload',
+            data={**base_data, 'file': (BytesIO(b'data'), 'document.txt')},
+            content_type='multipart/form-data',
+            base_url=f'http://{client_ip}:5000',
+            environ_overrides={'REMOTE_ADDR': client_ip},
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        payload = response.get_json()
+        self.assertIsNotNone(payload)
+        self.assertIn('Host header', payload.get('error', ''))
+        self.assertFalse(node_module.blockchain.transactions)
 
     def test_invalid_file_owner_does_not_break_sync(self):
         tx_id = uuid.uuid4().hex
