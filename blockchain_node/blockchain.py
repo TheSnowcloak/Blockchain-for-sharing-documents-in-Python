@@ -201,6 +201,7 @@ class Blockchain:
             for tx in self.transactions:
                 file_path = tx.get("file_path")
                 if not file_path:
+                    tx.pop("stored_file_name", None)
                     continue
 
                 target_path = file_path
@@ -215,6 +216,11 @@ class Blockchain:
                     target_path = os.path.join("./uploads", os.path.basename(file_path))
 
                 tx["file_path"] = target_path
+                stored_name = os.path.basename(os.path.normpath(target_path)) if target_path else None
+                if stored_name:
+                    tx["stored_file_name"] = stored_name
+                else:
+                    tx.pop("stored_file_name", None)
 
             if not system_override and not self.is_authorized_validator():
                 raise PermissionError("This node is not authorized to propose blocks.")
@@ -267,6 +273,7 @@ class Blockchain:
         signature,
         is_sensitive="0",
         file_owner=None,
+        stored_file_name=None,
     ):
         with self._lock:
             if self.transaction_exists(tx_id):
@@ -283,6 +290,11 @@ class Blockchain:
                 "recipient_alias": recipient_alias,
                 "is_sensitive": is_sensitive,
             })
+
+            if not stored_file_name and file_path:
+                stored_file_name = os.path.basename(os.path.normpath(file_path))
+            if stored_file_name:
+                transaction["stored_file_name"] = stored_file_name
 
             if sender != MINING_SENDER:
                 signable = self._build_signable_transaction(transaction)
@@ -383,7 +395,7 @@ class Blockchain:
         return None
 
     def _download_file_with_retry(self, netloc, tx, local_abs, stage="immediate", attempt_offset=0):
-        filename = tx.get("file_name")
+        filename = tx.get("stored_file_name") or tx.get("file_name")
         if not filename:
             return False
         url = f"http://{netloc}/file/{filename}"
@@ -467,7 +479,7 @@ class Blockchain:
             self._record_sync_failure(
                 "download",
                 netloc,
-                filename=tx.get("file_name"),
+                filename=tx.get("stored_file_name") or tx.get("file_name"),
                 error="Exceeded deferred retry limit",
                 attempt=attempt,
                 stage="deferred",
@@ -726,6 +738,8 @@ class Blockchain:
                 url = f"http://{netloc}/transactions/new"
                 payload = dict(tx_dict)
                 payload["skip_broadcast"] = True
+                if payload.get("file_path") and not payload.get("stored_file_name"):
+                    payload["stored_file_name"] = os.path.basename(os.path.normpath(payload["file_path"]))
                 requests.post(url, json=payload, timeout=3)
             except requests.exceptions.RequestException as exc:
                 logging.warning(f"Broadcast to {netloc} failed: {exc}")
@@ -1011,6 +1025,7 @@ def node_upload():
             signature=signature,
             is_sensitive=is_sensitive,
             file_owner=file_owner,
+            stored_file_name=pending_filename,
         )
 
     if not idx:
@@ -1061,6 +1076,19 @@ def new_transaction():
     if not (_is_safe_subpath(file_path_value, PENDING_FOLDER) or _is_safe_subpath(file_path_value, UPLOAD_FOLDER)):
         return "Invalid file_path", 400
 
+    stored_name = data.get("stored_file_name")
+    if stored_name:
+        try:
+            data["stored_file_name"] = _ensure_safe_filename(stored_name)
+        except ValueError:
+            return "Invalid stored_file_name", 400
+    else:
+        derived_name = os.path.basename(os.path.normpath(file_path_value))
+        try:
+            data["stored_file_name"] = _ensure_safe_filename(derived_name)
+        except ValueError:
+            return "Invalid stored_file_name", 400
+
     with blockchain.lock:
         idx = blockchain.add_transaction(
             tx_id=data["tx_id"],
@@ -1073,6 +1101,7 @@ def new_transaction():
             signature=data['signature'],
             is_sensitive=data.get('is_sensitive', '0'),
             file_owner=data.get('file_owner'),
+            stored_file_name=data.get('stored_file_name'),
         )
 
     if not idx:
@@ -1103,9 +1132,14 @@ def get_file(filename):
     Returns the file from ./uploads, either plaintext or ciphertext if is_sensitive=1.
     """
     try:
-        return send_from_directory(UPLOAD_FOLDER, filename, as_attachment=False)
+        safe_name = _ensure_safe_filename(filename)
+    except ValueError:
+        abort(400, "Invalid filename")
+    upload_root = os.path.abspath(UPLOAD_FOLDER)
+    try:
+        return send_from_directory(upload_root, safe_name, as_attachment=False)
     except FileNotFoundError:
-        abort(404,"File not found")
+        abort(404, "File not found")
 
 @app.route('/decrypt/<tx_id>', methods=['GET'])
 def decrypt_file(tx_id):
@@ -1119,24 +1153,27 @@ def decrypt_file(tx_id):
         chain_snapshot = copy.deepcopy(blockchain.chain)
 
     file_name = None
+    stored_file_name = None
     for block in chain_snapshot:
         for tx in block["transactions"]:
             if tx.get("tx_id") == tx_id:
                 if tx.get("is_sensitive","0") != "1":
                     return jsonify({"error":"Not a sensitive TX"}),400
                 file_name = tx.get("file_name")
+                stored_file_name = tx.get("stored_file_name") or file_name
                 break
-        if file_name:
+        if stored_file_name:
             break
 
-    if not file_name:
+    if not stored_file_name:
         return jsonify({"error":"Transaction not found or not sensitive."}),404
 
     enc_info = get_encryption_keys(tx_id)
     if not enc_info:
         return jsonify({"error":"No encryption info stored for this TX"}),404
 
-    up_abs = os.path.join(UPLOAD_FOLDER, file_name)
+    uploads_root = os.path.abspath(UPLOAD_FOLDER)
+    up_abs = os.path.join(uploads_root, stored_file_name)
     if not os.path.exists(up_abs):
         return jsonify({"error":"File not found in ./uploads"}),404
 
@@ -1157,7 +1194,8 @@ def decrypt_file(tx_id):
     bio = BytesIO(plaintext)
     bio.seek(0)
 
-    ext = os.path.splitext(file_name)[1].lower()
+    effective_name = file_name or stored_file_name
+    ext = os.path.splitext(effective_name)[1].lower()
     ct_map = {
         '.pdf': 'application/pdf',
         '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
@@ -1167,7 +1205,7 @@ def decrypt_file(tx_id):
         '.txt': 'text/plain'
     }
     content_type = ct_map.get(ext, 'application/octet-stream')
-    dec_name = "decrypted_" + file_name
+    dec_name = "decrypted_" + effective_name
 
     return send_file(bio,
                      as_attachment=True,
