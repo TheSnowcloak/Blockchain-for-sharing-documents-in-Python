@@ -119,6 +119,10 @@ Trusted nodes can access sensitive data and participate in Proof-of-Authority (P
    :: Windows CMD or PowerShell
    curl.exe -X POST "http://127.0.0.1:5000/trusted_nodes/register" -H "Content-Type: application/json" -d "{\"nodes\": [\"http://127.0.0.1:5001\"]}"
    ```
+   ```bat
+   :: Windows alternative without JSON escaping (URL-encoded form data)
+   curl.exe -X POST "http://127.0.0.1:5000/trusted_nodes/register" --data-urlencode "nodes=http://127.0.0.1:5001"
+   ```
 2. Remove a trusted node:
    ```sh
    curl -X POST http://127.0.0.1:5000/trusted_nodes/remove \
