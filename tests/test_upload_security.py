@@ -13,6 +13,7 @@ class UploadSecurityTestCase(unittest.TestCase):
     def setUp(self):
         self.client = node_module.app.test_client()
         node_module.blockchain.transactions = []
+        self._original_validator_netloc = node_module.blockchain.validator_netloc
         self._created_paths = []
         self._keys_db_backup = None
         for folder in (node_module.PENDING_FOLDER, node_module.UPLOAD_FOLDER):
@@ -37,6 +38,7 @@ class UploadSecurityTestCase(unittest.TestCase):
             except FileNotFoundError:
                 pass
         node_module.blockchain.transactions = []
+        node_module.blockchain.validator_netloc = self._original_validator_netloc
         if os.path.exists(node_module.KEYS_DB_FILE):
             os.remove(node_module.KEYS_DB_FILE)
         if self._keys_db_backup is not None:
@@ -215,6 +217,50 @@ class UploadSecurityTestCase(unittest.TestCase):
             final_keys_state = json.load(fh)
 
         self.assertEqual(final_keys_state, first_keys_state)
+
+    def test_host_header_validation_and_file_owner_defaults(self):
+        node_module.blockchain.validator_netloc = 'validator.local:6001'
+
+        base_data = {
+            'sender': node_module.MINING_SENDER,
+            'recipient': 'recipient',
+            'signature': '',
+            'alias': '',
+            'recipient_alias': '',
+            'is_sensitive': '0',
+            'file_name': 'document.txt',
+            'file_path': './pending_uploads/ignored.txt',
+        }
+
+        spoof_response = self.client.post(
+            '/node/upload',
+            data={**base_data, 'tx_id': uuid.uuid4().hex, 'file': (BytesIO(b'data'), 'document.txt')},
+            content_type='multipart/form-data',
+            base_url='http://peer-b:5000',
+            environ_overrides={'REMOTE_ADDR': '127.0.0.1'},
+        )
+
+        self.assertEqual(spoof_response.status_code, 400, spoof_response.data)
+        self.assertIn('Host header', spoof_response.get_json()['error'])
+        self.assertFalse(node_module.blockchain.transactions)
+
+        valid_tx_id = uuid.uuid4().hex
+        valid_response = self.client.post(
+            '/node/upload',
+            data={**base_data, 'tx_id': valid_tx_id, 'file': (BytesIO(b'legit'), 'document.txt')},
+            content_type='multipart/form-data',
+            base_url='http://validator.local:6001',
+            environ_overrides={'REMOTE_ADDR': '127.0.0.1'},
+        )
+
+        self.assertEqual(valid_response.status_code, 201, valid_response.data)
+        self.assertTrue(node_module.blockchain.transactions)
+        tx = node_module.blockchain.transactions[-1]
+        self.assertEqual(tx['file_owner'], 'validator.local:6001')
+
+        pending_abs = os.path.abspath(os.path.join('.', tx['file_path'].lstrip('./')))
+        if os.path.exists(pending_abs):
+            self._created_paths.append(pending_abs)
 
 
 if __name__ == '__main__':

@@ -143,6 +143,11 @@ Trusted nodes can access sensitive data and participate in Proof-of-Authority (P
 
 > After every change ensure each node’s `/nodes/get` and `/trusted_nodes/get` responses match so the configuration remains consistent across the network.
 
+#### Upload files securely (`/node/upload`)
+- The node now validates the HTTP `Host` header for every upload. Requests are rejected with **HTTP 400** if the host does not resolve to the current node (for example if a client spoofs another peer’s address).
+- Configure the node’s own address through `/validator/configure` (`netloc` field) or by setting `LOCAL_NODE_NETLOCS` (comma-, space-, or JSON-separated list) before starting the server.
+- Clients must submit uploads using the same host/port combination that peers use to reach the node so that the resulting transactions advertise a reachable file owner.
+
 ### Customising the Network and Testing Multiple Nodes
 #### Change the node IP/port
 1. **Edit the Flask configuration** – In `blockchain_node/blockchain.py` modify the line `app.run(host="0.0.0.0", port=5000)` to the desired port (e.g., `port=5001`) and restart the node.

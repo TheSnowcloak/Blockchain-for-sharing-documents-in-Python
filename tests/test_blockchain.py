@@ -2,6 +2,8 @@ import binascii
 import importlib
 import os
 import sys
+import uuid
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -198,6 +200,100 @@ def test_sync_files_skips_owner_when_local_node(isolated_blockchain, monkeypatch
     assert not downloaded.exists(), "File should not have been downloaded"
     assert "http://owner-host:6001/file/shared.txt" not in calls
     assert scheduled == [("peer-b:5000", 1)]
+
+
+def test_upload_host_validation_and_sync_uses_validator_owner(isolated_blockchain, monkeypatch):
+    bc, module = isolated_blockchain
+
+    bc.validator_netloc = "owner-host:6001"
+    bc.add_trusted_node("owner-host:6001")
+    client = module.app.test_client()
+
+    base_form = {
+        "sender": module.MINING_SENDER,
+        "recipient": "recipient",
+        "signature": "",
+        "alias": "",
+        "recipient_alias": "",
+        "is_sensitive": "0",
+        "file_name": "sync.txt",
+        "file_path": "./pending_uploads/ignored.txt",
+    }
+
+    spoof_resp = client.post(
+        "/node/upload",
+        data={**base_form, "tx_id": uuid.uuid4().hex, "file": (BytesIO(b"spoof"), "sync.txt")},
+        content_type="multipart/form-data",
+        base_url="http://peer-b:5000",
+        environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert spoof_resp.status_code == 400
+    assert bc.transactions == []
+
+    good_tx_id = uuid.uuid4().hex
+    valid_resp = client.post(
+        "/node/upload",
+        data={**base_form, "tx_id": good_tx_id, "file": (BytesIO(b"payload"), "sync.txt")},
+        content_type="multipart/form-data",
+        base_url="http://owner-host:6001",
+        environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert valid_resp.status_code == 201
+    assert bc.transactions, "Accepted upload should be recorded"
+
+    tx = bc.transactions[-1]
+    assert tx["file_owner"] == "owner-host:6001"
+    stored_name = tx["stored_file_name"]
+
+    prev_hash = bc.hash(bc.last_block)
+    bc.create_block(proof=100, previous_hash=prev_hash)
+    chain_snapshot = list(bc.chain)
+
+    uploaded_path = Path(module.UPLOAD_FOLDER) / stored_name
+    assert uploaded_path.exists()
+    uploaded_path.unlink()
+
+    bc.validator_netloc = "remote-peer:5000"
+    bc.nodes = {"peer-b:5000"}
+    bc.trusted_nodes = set()
+
+    file_bytes = b"genuine-sync"
+
+    class DummyResponse:
+        def __init__(self, status, json_data=None, content=b""):
+            self.status_code = status
+            self._json = json_data
+            self._content = content
+
+        def json(self):
+            if self._json is None:
+                raise ValueError("No JSON body")
+            return self._json
+
+        def iter_content(self, chunk_size):
+            yield self._content
+
+    calls = []
+
+    def fake_get(url, *args, **kwargs):
+        calls.append(url)
+        if url == f"http://peer-b:5000/file/{stored_name}":
+            return DummyResponse(404)
+        if url == f"http://owner-host:6001/file/{stored_name}":
+            return DummyResponse(200, content=file_bytes)
+        raise AssertionError(f"Unexpected URL requested: {url}")
+
+    monkeypatch.setattr(module.requests, "get", fake_get)
+    monkeypatch.setattr(bc, "_fetch_chain_with_retry", lambda netloc: chain_snapshot)
+
+    bc.sync_files()
+
+    final_path = Path(module.UPLOAD_FOLDER) / stored_name
+    assert final_path.exists()
+    assert final_path.read_bytes() == file_bytes
+    assert f"http://owner-host:6001/file/{stored_name}" in calls
 
 
 def test_resolve_conflicts_clears_pending_transactions(isolated_blockchain, monkeypatch):
