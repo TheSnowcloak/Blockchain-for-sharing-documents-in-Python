@@ -529,6 +529,7 @@ class Blockchain:
 
             predicted_index = self.last_block["index"] + 1
             self.transactions.append(transaction)
+            self.save_data()
 
             mined_block = None
             if len(self.transactions) >= 5:
