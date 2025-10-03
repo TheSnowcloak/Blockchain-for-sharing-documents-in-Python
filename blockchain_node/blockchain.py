@@ -237,14 +237,11 @@ def _get_known_local_hosts():
     return _LOCAL_HOST_CACHE
 
 
-def _host_header_matches_local(host_netloc, remote_addr, configured_netlocs, resolver):
+def _host_header_matches_local(host_netloc, configured_netlocs, resolver):
     try:
         host, _ = _split_host_port(host_netloc)
     except ValueError:
         return False
-
-    # ``remote_addr`` is intentionally ignored. Only explicitly configured or
-    # locally resolvable hosts are treated as valid identifiers for this node.
 
     allowed_hosts = set(_get_known_local_hosts())
 
@@ -1541,16 +1538,15 @@ def node_upload():
             if normalized_validator not in configured_self_netlocs:
                 configured_self_netlocs.insert(0, normalized_validator)
 
+    if not configured_self_netlocs:
+        return jsonify({"error": "LOCAL_NODE_NETLOCS must be configured"}), 400
+
     if not _host_header_matches_local(
         normalized_host_header,
-        request.remote_addr,
         configured_self_netlocs,
         blockchain._resolve_host_to_ips,
     ):
         return jsonify({"error": "Host header does not identify this node"}), 400
-
-    if not configured_self_netlocs:
-        return jsonify({"error": "LOCAL_NODE_NETLOCS must be configured"}), 400
 
     header_ips = set(blockchain._resolve_host_to_ips(header_host))
     header_ips.add(header_host)
