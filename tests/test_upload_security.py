@@ -1,3 +1,5 @@
+import base64
+import copy
 import hashlib
 import json
 import os
@@ -7,6 +9,9 @@ import uuid
 from io import BytesIO
 
 from blockchain_node import blockchain as node_module
+
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
 
 
 class UploadSecurityTestCase(unittest.TestCase):
@@ -409,6 +414,96 @@ class UploadSecurityTestCase(unittest.TestCase):
         self.assertEqual(scheduled_args[0], 'peer-a:5000')
         self.assertEqual(scheduled_kwargs.get('attempt'), 1)
         mock_clear.assert_not_called()
+
+    def test_malformed_encryption_payload_rejected_and_decrypt_succeeds_for_valid_upload(self):
+        malformed_tx_id = uuid.uuid4().hex
+        invalid_payload = {
+            'sender': node_module.MINING_SENDER,
+            'recipient': 'recipient',
+            'signature': '',
+            'tx_id': malformed_tx_id,
+            'alias': '',
+            'recipient_alias': '',
+            'is_sensitive': '1',
+            'file_name': 'secret.txt',
+            'file_path': './pending_uploads/ignored.txt',
+            'enc_key_b64': '***not-base64***',
+            'enc_nonce_b64': 'also_bad',
+            'enc_tag_b64': '!!!',
+        }
+
+        malformed_response = self.client.post(
+            '/node/upload',
+            data={**invalid_payload, 'file': (BytesIO(b'cipher'), 'secret.txt')},
+            content_type='multipart/form-data',
+        )
+
+        self.assertEqual(malformed_response.status_code, 400, malformed_response.data)
+        self.assertFalse(os.path.exists(node_module.KEYS_DB_FILE))
+        self.assertFalse(node_module.blockchain.transactions)
+
+        plaintext = b'secret document payload'
+        aes_key = get_random_bytes(32)
+        cipher = AES.new(aes_key, AES.MODE_GCM)
+        ciphertext, tag = cipher.encrypt_and_digest(plaintext)
+        nonce = cipher.nonce
+
+        valid_tx_id = uuid.uuid4().hex
+        valid_file_name = 'valid.bin'
+        valid_payload = {
+            'sender': node_module.MINING_SENDER,
+            'recipient': 'recipient',
+            'signature': '',
+            'tx_id': valid_tx_id,
+            'alias': '',
+            'recipient_alias': '',
+            'is_sensitive': '1',
+            'file_name': valid_file_name,
+            'file_path': './pending_uploads/ignored.txt',
+            'enc_key_b64': base64.b64encode(aes_key).decode('ascii'),
+            'enc_nonce_b64': base64.b64encode(nonce).decode('ascii'),
+            'enc_tag_b64': base64.b64encode(tag).decode('ascii'),
+        }
+
+        valid_response = self.client.post(
+            '/node/upload',
+            data={**valid_payload, 'file': (BytesIO(ciphertext), valid_file_name)},
+            content_type='multipart/form-data',
+        )
+
+        self.assertEqual(valid_response.status_code, 201, valid_response.data)
+
+        original_chain = copy.deepcopy(node_module.blockchain.chain)
+        try:
+            previous_hash = node_module.blockchain.hash(node_module.blockchain.last_block)
+            node_module.blockchain.create_block(
+                proof=777,
+                previous_hash=previous_hash,
+                system_override=True,
+            )
+
+            tx_record = None
+            for block in node_module.blockchain.chain:
+                for tx in block.get('transactions', []):
+                    if tx.get('tx_id') == valid_tx_id:
+                        tx_record = tx
+                        break
+                if tx_record:
+                    break
+
+            self.assertIsNotNone(tx_record, 'Expected transaction in blockchain after mining')
+
+            stored_name = tx_record.get('stored_file_name') or tx_record.get('file_name')
+            upload_path = os.path.abspath(os.path.join(node_module.UPLOAD_FOLDER, stored_name))
+            if os.path.exists(upload_path):
+                self._created_paths.append(upload_path)
+
+            decrypt_response = self.client.get(f'/decrypt/{valid_tx_id}')
+            self.assertEqual(decrypt_response.status_code, 200, decrypt_response.data)
+            self.assertEqual(decrypt_response.data, plaintext)
+        finally:
+            node_module.blockchain.chain = original_chain
+            node_module.blockchain.transactions = []
 
 
 if __name__ == '__main__':
