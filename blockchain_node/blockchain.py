@@ -1448,13 +1448,17 @@ class Blockchain:
             self.save_data()
 
     def remove_node(self, address):
-        normalized = normalize_netloc(address)
+        try:
+            normalized = normalize_netloc(address)
+        except ValueError:
+            return False
+
         with self._lock:
             if normalized in self.nodes:
                 self.nodes.remove(normalized)
                 self.save_data()
                 return True
-        return False
+        return None
 
     def _clear_trusted_cache_entry(self, netloc):
         try:
@@ -1471,14 +1475,18 @@ class Blockchain:
             self.save_data()
 
     def remove_trusted_node(self, address):
-        normalized = normalize_netloc(address)
+        try:
+            normalized = normalize_netloc(address)
+        except ValueError:
+            return False
+
         with self._lock:
             if normalized in self.trusted_nodes:
                 self.trusted_nodes.remove(normalized)
                 self._clear_trusted_cache_entry(normalized)
                 self.save_data()
                 return True
-        return False
+        return None
 
     def get_trusted_netloc_ips(self, netloc):
         try:
@@ -2179,8 +2187,16 @@ def remove_node():
     rm = d['node'].strip()
     with blockchain.lock:
         rem = blockchain.remove_node(rm)
-    if rem:
+
+    if rem is True:
         return jsonify({"message": f"Node {rm} removed"}),200
+
+    if rem is False:
+        return jsonify({
+            "message": f"Invalid node address: {rm}",
+            "details": "Unable to parse node address",
+        }),400
+
     return jsonify({"message":"Node not found"}),404
 
 @app.route('/nodes/get', methods=['GET'])
@@ -2248,8 +2264,16 @@ def remove_trusted_node():
     rm = d['node'].strip()
     with blockchain.lock:
         rem = blockchain.remove_trusted_node(rm)
-    if rem:
+
+    if rem is True:
         return jsonify({"message": f"Trusted node {rm} removed"}),200
+
+    if rem is False:
+        return jsonify({
+            "message": f"Invalid trusted node address: {rm}",
+            "details": "Unable to parse trusted node address",
+        }),400
+
     return jsonify({"message":"Trusted node not found"}),404
 
 @app.route('/trusted_nodes/get', methods=['GET'])

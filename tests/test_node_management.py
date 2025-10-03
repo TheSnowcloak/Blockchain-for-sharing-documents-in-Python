@@ -92,3 +92,77 @@ def test_trusted_register_rejects_invalid_netloc(isolated_app):
     body = response.get_json()
     assert "Invalid trusted node address" in body["message"]
     assert module.blockchain.trusted_nodes == initial_trusted
+
+
+def test_nodes_remove_invalid_address_returns_400(isolated_app):
+    module = isolated_app
+    client = module.app.test_client()
+
+    module.blockchain.add_node("127.0.0.1:5000")
+    initial_nodes = set(module.blockchain.nodes)
+
+    response = client.post(
+        "/nodes/remove",
+        json={"node": "http://:5000"},
+        environ_base=_trusted_environ(),
+    )
+
+    assert response.status_code == 400
+    body = response.get_json()
+    assert "Invalid node address" in body["message"]
+    assert module.blockchain.nodes == initial_nodes
+
+
+def test_nodes_remove_valid_address_succeeds(isolated_app):
+    module = isolated_app
+    client = module.app.test_client()
+
+    module.blockchain.add_node("127.0.0.1:5000")
+
+    response = client.post(
+        "/nodes/remove",
+        json={"node": "127.0.0.1:5000"},
+        environ_base=_trusted_environ(),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["message"] == "Node 127.0.0.1:5000 removed"
+    assert "127.0.0.1:5000" not in module.blockchain.nodes
+
+
+def test_trusted_nodes_remove_invalid_address_returns_400(isolated_app):
+    module = isolated_app
+    client = module.app.test_client()
+
+    module.blockchain.add_trusted_node("127.0.0.1:5000")
+    initial_trusted = set(module.blockchain.trusted_nodes)
+
+    response = client.post(
+        "/trusted_nodes/remove",
+        json={"node": "http://:5000"},
+        environ_base=_trusted_environ(),
+    )
+
+    assert response.status_code == 400
+    body = response.get_json()
+    assert "Invalid trusted node address" in body["message"]
+    assert module.blockchain.trusted_nodes == initial_trusted
+
+
+def test_trusted_nodes_remove_valid_address_succeeds(isolated_app):
+    module = isolated_app
+    client = module.app.test_client()
+
+    module.blockchain.add_trusted_node("127.0.0.1:5000")
+
+    response = client.post(
+        "/trusted_nodes/remove",
+        json={"node": "127.0.0.1:5000"},
+        environ_base=_trusted_environ(),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["message"] == "Trusted node 127.0.0.1:5000 removed"
+    assert "127.0.0.1:5000" not in module.blockchain.trusted_nodes
