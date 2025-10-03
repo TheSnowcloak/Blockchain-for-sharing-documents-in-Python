@@ -44,3 +44,22 @@ def test_resolve_conflicts_skips_garbage_responses(isolated_blockchain, monkeypa
 
     assert replaced is False
     assert [dict(block) for block in blockchain.chain] == original_chain
+
+
+def test_sync_files_skips_garbage_responses(isolated_blockchain, monkeypatch):
+    blockchain = isolated_blockchain
+    blockchain.nodes.add("malicious:5000")
+
+    monkeypatch.setattr(blockchain, "_fetch_chain_with_retry", lambda netloc: ["garbage"])
+
+    def fail_download(*args, **kwargs):
+        raise AssertionError("download should not be attempted for garbage data")
+
+    monkeypatch.setattr(blockchain, "_download_file_with_retry", fail_download)
+
+    def fail_schedule(*args, **kwargs):
+        raise AssertionError("deferred retry should not be scheduled for garbage data")
+
+    monkeypatch.setattr(blockchain, "_schedule_deferred_retry", fail_schedule)
+
+    blockchain.sync_files()

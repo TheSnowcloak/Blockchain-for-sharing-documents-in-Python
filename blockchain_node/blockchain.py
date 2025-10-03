@@ -1171,72 +1171,144 @@ class Blockchain:
             all_nodes = list(self.nodes.union(self.trusted_nodes))
             local_netloc = normalize_netloc(self.validator_netloc) if self.validator_netloc else None
         for netloc in all_nodes:
-            normalized_source = normalize_netloc(netloc)
-            chain_data = self._fetch_chain_with_retry(netloc)
+            try:
+                normalized_source = normalize_netloc(netloc)
+            except Exception as exc:
+                logging.warning(
+                    "Skipping peer %r due to invalid netloc: %s",
+                    netloc,
+                    exc,
+                )
+                continue
+
+            try:
+                chain_data = self._fetch_chain_with_retry(netloc)
+            except Exception as exc:
+                logging.warning(
+                    "Failed to fetch chain from %s: %s",
+                    normalized_source,
+                    exc,
+                )
+                continue
+
             if not chain_data:
                 continue
-            for block in chain_data:
-                for tx in block.get("transactions", []):
-                    if tx.get("is_sensitive", "0") == "1" and netloc not in trusted_snapshot:
+
+            if not isinstance(chain_data, (list, tuple)):
+                logging.warning(
+                    "Peer %s returned unexpected chain structure type %s",
+                    normalized_source,
+                    type(chain_data).__name__,
+                )
+                continue
+
+            try:
+                for position, block in enumerate(chain_data):
+                    if not self._is_valid_block_structure(block, position):
                         continue
-                    file_path = tx.get("file_path", "")
-                    if not file_path:
-                        continue
-                    normalized_path = os.path.normpath(file_path)
-                    safe_relative_path = os.path.join(
-                        ".", normalized_path.lstrip("./")
-                    )
-                    if not _is_safe_subpath(safe_relative_path, UPLOAD_FOLDER):
-                        self._record_sync_failure(
-                            "download",
+
+                    transactions = block.get("transactions", [])
+                    if not isinstance(transactions, list):
+                        logging.warning(
+                            "Block at position %s from %s has invalid transactions type %s",
+                            position,
                             normalized_source,
-                            filename=tx.get("stored_file_name")
-                            or tx.get("file_name"),
-                            error=f"Rejected unsafe file path: {file_path}",
-                            stage="validation",
+                            type(transactions).__name__,
                         )
                         continue
-                    local_abs = safe_relative_path
-                    key = (netloc, file_path)
-                    if os.path.exists(local_abs):
-                        self._clear_deferred_retry(key)
-                        continue
-                    success = self._download_file_with_retry(netloc, tx, local_abs)
-                    owner_netloc = tx.get("file_owner")
-                    attempted_owner = False
-                    owner_key = None
-                    owner_normalized = None
-                    if not success and owner_netloc:
-                        try:
-                            owner_normalized = normalize_netloc(owner_netloc)
-                        except Exception as exc:
+
+                    for tx_index, tx in enumerate(transactions):
+                        if not isinstance(tx, Mapping):
                             logging.warning(
-                                "Skipping owner retry for %s due to invalid netloc %r: %s",
-                                file_path,
-                                owner_netloc,
-                                exc,
+                                "Block at position %s from %s has invalid transaction %s type %s",
+                                position,
+                                normalized_source,
+                                tx_index,
+                                type(tx).__name__,
                             )
-                        else:
-                            if owner_normalized != normalized_source and owner_normalized != local_netloc:
-                                attempted_owner = True
-                                owner_key = (owner_normalized, file_path)
-                                success = self._download_file_with_retry(
-                                    owner_normalized,
-                                    tx,
-                                    local_abs,
-                                    attempt_offset=self.sync_max_retries,
+                            continue
+
+                        if (
+                            tx.get("is_sensitive", "0") == "1"
+                            and netloc not in trusted_snapshot
+                        ):
+                            continue
+
+                        file_path = tx.get("file_path", "")
+                        if not file_path:
+                            continue
+
+                        normalized_path = os.path.normpath(file_path)
+                        safe_relative_path = os.path.join(
+                            ".", normalized_path.lstrip("./")
+                        )
+                        if not _is_safe_subpath(safe_relative_path, UPLOAD_FOLDER):
+                            self._record_sync_failure(
+                                "download",
+                                normalized_source,
+                                filename=tx.get("stored_file_name")
+                                or tx.get("file_name"),
+                                error=f"Rejected unsafe file path: {file_path}",
+                                stage="validation",
+                            )
+                            continue
+
+                        local_abs = safe_relative_path
+                        key = (netloc, file_path)
+                        if os.path.exists(local_abs):
+                            self._clear_deferred_retry(key)
+                            continue
+
+                        success = self._download_file_with_retry(netloc, tx, local_abs)
+                        owner_netloc = tx.get("file_owner")
+                        attempted_owner = False
+                        owner_key = None
+                        owner_normalized = None
+                        if not success and owner_netloc:
+                            try:
+                                owner_normalized = normalize_netloc(owner_netloc)
+                            except Exception as exc:
+                                logging.warning(
+                                    "Skipping owner retry for %s due to invalid netloc %r: %s",
+                                    file_path,
+                                    owner_netloc,
+                                    exc,
                                 )
-                                if success:
-                                    self._clear_deferred_retry(owner_key)
-                    if success:
-                        self._clear_deferred_retry(key)
-                        if attempted_owner and owner_key:
-                            self._clear_deferred_retry(owner_key)
-                    else:
-                        if attempted_owner and owner_key and owner_normalized:
-                            self._schedule_deferred_retry(owner_normalized, tx, attempt=1)
+                            else:
+                                if (
+                                    owner_normalized != normalized_source
+                                    and owner_normalized != local_netloc
+                                ):
+                                    attempted_owner = True
+                                    owner_key = (owner_normalized, file_path)
+                                    success = self._download_file_with_retry(
+                                        owner_normalized,
+                                        tx,
+                                        local_abs,
+                                        attempt_offset=self.sync_max_retries,
+                                    )
+                                    if success:
+                                        self._clear_deferred_retry(owner_key)
+
+                        if success:
+                            self._clear_deferred_retry(key)
+                            if attempted_owner and owner_key:
+                                self._clear_deferred_retry(owner_key)
                         else:
-                            self._schedule_deferred_retry(netloc, tx, attempt=1)
+                            if attempted_owner and owner_key and owner_normalized:
+                                self._schedule_deferred_retry(
+                                    owner_normalized, tx, attempt=1
+                                )
+                            else:
+                                self._schedule_deferred_retry(netloc, tx, attempt=1)
+            except Exception as exc:
+                logging.warning(
+                    "Unexpected error while processing chain from %s: %s",
+                    normalized_source,
+                    exc,
+                    exc_info=True,
+                )
+                continue
 
     def broadcast_new_transaction(self, tx_dict):
         with self._lock:
