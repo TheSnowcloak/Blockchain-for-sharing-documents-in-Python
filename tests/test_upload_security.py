@@ -305,7 +305,6 @@ class UploadSecurityTestCase(unittest.TestCase):
             'sender': node_module.MINING_SENDER,
             'recipient': 'recipient',
             'signature': '',
-            'tx_id': uuid.uuid4().hex,
             'alias': '',
             'recipient_alias': '',
             'is_sensitive': '0',
@@ -313,9 +312,11 @@ class UploadSecurityTestCase(unittest.TestCase):
             'file_path': './pending_uploads/ignored.txt',
         }
 
+        initial_tx_id = uuid.uuid4().hex
+
         response = self.client.post(
             '/node/upload',
-            data={**base_data, 'file': (BytesIO(b'data'), 'document.txt')},
+            data={**base_data, 'tx_id': initial_tx_id, 'file': (BytesIO(b'data'), 'document.txt')},
             content_type='multipart/form-data',
             base_url=f'http://{client_ip}:5000',
             environ_overrides={'REMOTE_ADDR': client_ip},
@@ -324,8 +325,37 @@ class UploadSecurityTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400, response.data)
         payload = response.get_json()
         self.assertIsNotNone(payload)
-        self.assertIn('Host header', payload.get('error', ''))
+        self.assertIn('LOCAL_NODE_NETLOCS must be configured', payload.get('error', ''))
         self.assertFalse(node_module.blockchain.transactions)
+
+        for name in os.listdir(node_module.PENDING_FOLDER):
+            path = os.path.join(node_module.PENDING_FOLDER, name)
+            if os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+
+        node_module.app.config['LOCAL_NODE_NETLOCS'] = f'{client_ip}:5000'
+        os.environ['LOCAL_NODE_NETLOCS'] = f'{client_ip}:5000'
+
+        allowed_tx_id = uuid.uuid4().hex
+        response_allowed = self.client.post(
+            '/node/upload',
+            data={**base_data, 'tx_id': allowed_tx_id, 'file': (BytesIO(b'pass'), 'document.txt')},
+            content_type='multipart/form-data',
+            base_url=f'http://{client_ip}:5000',
+            environ_overrides={'REMOTE_ADDR': client_ip},
+        )
+
+        self.assertEqual(response_allowed.status_code, 201, response_allowed.data)
+        self.assertTrue(node_module.blockchain.transactions)
+        tx = node_module.blockchain.transactions[-1]
+        self.assertEqual(tx['file_owner'], f'{client_ip}:5000')
+
+        pending_abs = os.path.abspath(os.path.join('.', tx['file_path'].lstrip('./')))
+        if os.path.exists(pending_abs):
+            self._created_paths.append(pending_abs)
 
     def test_invalid_file_owner_does_not_break_sync(self):
         tx_id = uuid.uuid4().hex
