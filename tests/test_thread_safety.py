@@ -57,6 +57,7 @@ class UploadConsensusHammerTest(unittest.TestCase):
                     recipient_alias=f"recipient-alias-{prefix}",
                     signature="",
                     is_sensitive="0",
+                    allow_system_transaction=True,
                 )
 
         def consensus_worker():

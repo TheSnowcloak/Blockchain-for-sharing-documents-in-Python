@@ -1,4 +1,5 @@
 import base64
+import binascii
 import copy
 import hashlib
 import json
@@ -12,6 +13,9 @@ from blockchain_node import blockchain as node_module
 
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
+from Crypto.Signature import pkcs1_15
+from Crypto.Hash import SHA256
+from Crypto.PublicKey import RSA
 
 
 class UploadSecurityTestCase(unittest.TestCase):
@@ -25,6 +29,10 @@ class UploadSecurityTestCase(unittest.TestCase):
         self._original_trusted_nodes = set(node_module.blockchain.trusted_nodes)
         node_module.app.config['LOCAL_NODE_NETLOCS'] = 'localhost:5000'
         os.environ['LOCAL_NODE_NETLOCS'] = 'localhost:5000'
+        self._signing_key = RSA.generate(1024)
+        self.sender_public_hex = binascii.hexlify(
+            self._signing_key.publickey().export_key(format='DER')
+        ).decode('ascii')
         self._created_paths = []
         self._keys_db_backup = None
         for folder in (node_module.PENDING_FOLDER, node_module.UPLOAD_FOLDER):
@@ -66,15 +74,77 @@ class UploadSecurityTestCase(unittest.TestCase):
             with open(node_module.KEYS_DB_FILE, 'w', encoding='utf-8') as fh:
                 fh.write(self._keys_db_backup)
 
+    def _signature_for(self, data):
+        payload = {
+            'tx_id': data['tx_id'],
+            'sender': data['sender'],
+            'recipient': data['recipient'],
+            'file_name': data['file_name'],
+            'alias': data.get('alias', ''),
+            'recipient_alias': data.get('recipient_alias', ''),
+            'is_sensitive': data.get('is_sensitive', '0'),
+        }
+        signable = node_module.blockchain._build_signable_transaction(payload)
+        digest = SHA256.new(json.dumps(signable, sort_keys=True).encode('utf-8'))
+        signature = pkcs1_15.new(self._signing_key).sign(digest)
+        return binascii.hexlify(signature).decode('ascii')
+
+    def _attach_signature(self, data):
+        data['signature'] = self._signature_for(data)
+        return data
+
+    def test_node_upload_rejects_reserved_sender(self):
+        tx_id = uuid.uuid4().hex
+        data = {
+            'sender': node_module.MINING_SENDER,
+            'recipient': 'recipient',
+            'signature': '',
+            'tx_id': tx_id,
+            'alias': '',
+            'recipient_alias': '',
+            'is_sensitive': '0',
+            'file_name': 'reserved.txt',
+            'file_path': './pending_uploads/ignored.txt',
+        }
+
+        response = self.client.post(
+            '/node/upload',
+            data={**data, 'file': (BytesIO(b'data'), 'reserved.txt')},
+            content_type='multipart/form-data',
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        body = response.get_json()
+        self.assertIsNotNone(body)
+        self.assertIn('Reserved sender', body.get('error', ''))
+        self.assertFalse(node_module.blockchain.transactions)
+
+    def test_transactions_new_rejects_reserved_sender(self):
+        payload = {
+            'tx_id': uuid.uuid4().hex,
+            'sender': node_module.MINING_SENDER,
+            'recipient': 'recipient',
+            'file_name': 'document.txt',
+            'file_path': './pending_uploads/document.txt',
+            'signature': '',
+        }
+
+        response = self.client.post('/transactions/new', json=payload)
+
+        self.assertEqual(response.status_code, 400, response.data)
+        body = response.get_json()
+        self.assertIsNotNone(body)
+        self.assertIn('Reserved sender', body.get('error', ''))
+        self.assertFalse(node_module.blockchain.transactions)
+
     def test_malicious_filename_rejected_and_node_file_intact(self):
         target_file = os.path.join('blockchain_node', 'blockchain.py')
         with open(target_file, 'rb') as fh:
             before_hash = hashlib.sha256(fh.read()).hexdigest()
 
         data = {
-            'sender': node_module.MINING_SENDER,
+            'sender': self.sender_public_hex,
             'recipient': 'recipient',
-            'signature': '',
             'tx_id': uuid.uuid4().hex,
             'alias': '',
             'recipient_alias': '',
@@ -82,6 +152,7 @@ class UploadSecurityTestCase(unittest.TestCase):
             'file_name': '../blockchain_node/blockchain.py',
             'file_path': '../blockchain_node/blockchain.py',
         }
+        self._attach_signature(data)
 
         response = self.client.post(
             '/node/upload',
@@ -97,9 +168,8 @@ class UploadSecurityTestCase(unittest.TestCase):
 
     def test_canonical_path_generated_under_pending_folder(self):
         data = {
-            'sender': node_module.MINING_SENDER,
+            'sender': self.sender_public_hex,
             'recipient': 'recipient',
-            'signature': '',
             'tx_id': uuid.uuid4().hex,
             'alias': '',
             'recipient_alias': '',
@@ -107,6 +177,7 @@ class UploadSecurityTestCase(unittest.TestCase):
             'file_name': 'document.txt',
             'file_path': './pending_uploads/will_be_ignored.txt',
         }
+        self._attach_signature(data)
 
         response = self.client.post(
             '/node/upload',
@@ -177,9 +248,8 @@ class UploadSecurityTestCase(unittest.TestCase):
         second_uuid = type('DummyUUID', (), {'hex': second_uuid_hex})()
 
         data = {
-            'sender': node_module.MINING_SENDER,
+            'sender': self.sender_public_hex,
             'recipient': 'recipient',
-            'signature': '',
             'tx_id': tx_id,
             'alias': '',
             'recipient_alias': '',
@@ -190,6 +260,7 @@ class UploadSecurityTestCase(unittest.TestCase):
             'enc_nonce_b64': 'Zmlyc3Qtbm9uY2U=',
             'enc_tag_b64': 'Zmlyc3QtdGFn',
         }
+        self._attach_signature(data)
 
         with mock.patch.object(node_module, 'uuid4', side_effect=[first_uuid, second_uuid]):
             response_first = self.client.post(
@@ -242,20 +313,23 @@ class UploadSecurityTestCase(unittest.TestCase):
     def test_host_header_validation_and_file_owner_defaults(self):
         node_module.blockchain.validator_netloc = 'validator.local:6001'
 
-        base_data = {
-            'sender': node_module.MINING_SENDER,
+        base_template = {
+            'sender': self.sender_public_hex,
             'recipient': 'recipient',
-            'signature': '',
             'alias': '',
             'recipient_alias': '',
             'is_sensitive': '0',
             'file_name': 'document.txt',
             'file_path': './pending_uploads/ignored.txt',
         }
+        def _with_tx(tx_id):
+            payload = dict(base_template)
+            payload['tx_id'] = tx_id
+            return self._attach_signature(payload)
 
         spoof_response = self.client.post(
             '/node/upload',
-            data={**base_data, 'tx_id': uuid.uuid4().hex, 'file': (BytesIO(b'data'), 'document.txt')},
+            data={**_with_tx(uuid.uuid4().hex), 'file': (BytesIO(b'data'), 'document.txt')},
             content_type='multipart/form-data',
             base_url='http://peer-b:5000',
             environ_overrides={'REMOTE_ADDR': '127.0.0.1'},
@@ -266,9 +340,10 @@ class UploadSecurityTestCase(unittest.TestCase):
         self.assertFalse(node_module.blockchain.transactions)
 
         valid_tx_id = uuid.uuid4().hex
+        valid_payload = _with_tx(valid_tx_id)
         valid_response = self.client.post(
             '/node/upload',
-            data={**base_data, 'tx_id': valid_tx_id, 'file': (BytesIO(b'legit'), 'document.txt')},
+            data={**valid_payload, 'file': (BytesIO(b'legit'), 'document.txt')},
             content_type='multipart/form-data',
             base_url='http://validator.local:6001',
             environ_overrides={'REMOTE_ADDR': '127.0.0.1'},
@@ -310,22 +385,25 @@ class UploadSecurityTestCase(unittest.TestCase):
 
         node_module.blockchain.validator_netloc = ''
 
-        base_data = {
-            'sender': node_module.MINING_SENDER,
+        base_template = {
+            'sender': self.sender_public_hex,
             'recipient': 'recipient',
-            'signature': '',
             'alias': '',
             'recipient_alias': '',
             'is_sensitive': '0',
             'file_name': 'document.txt',
             'file_path': './pending_uploads/ignored.txt',
         }
+        def build_payload(tx_id):
+            payload = dict(base_template)
+            payload['tx_id'] = tx_id
+            return self._attach_signature(payload)
 
         initial_tx_id = uuid.uuid4().hex
 
         response = self.client.post(
             '/node/upload',
-            data={**base_data, 'tx_id': initial_tx_id, 'file': (BytesIO(b'data'), 'document.txt')},
+            data={**build_payload(initial_tx_id), 'file': (BytesIO(b'data'), 'document.txt')},
             content_type='multipart/form-data',
             base_url=f'http://{client_ip}:5000',
             environ_overrides={'REMOTE_ADDR': client_ip},
@@ -349,9 +427,10 @@ class UploadSecurityTestCase(unittest.TestCase):
         os.environ['LOCAL_NODE_NETLOCS'] = f'{client_ip}:5000'
 
         allowed_tx_id = uuid.uuid4().hex
+        allowed_payload = build_payload(allowed_tx_id)
         response_allowed = self.client.post(
             '/node/upload',
-            data={**base_data, 'tx_id': allowed_tx_id, 'file': (BytesIO(b'pass'), 'document.txt')},
+            data={**allowed_payload, 'file': (BytesIO(b'pass'), 'document.txt')},
             content_type='multipart/form-data',
             base_url=f'http://{client_ip}:5000',
             environ_overrides={'REMOTE_ADDR': client_ip},
@@ -371,13 +450,13 @@ class UploadSecurityTestCase(unittest.TestCase):
         invalid_owner = 'http://example.com:badport'
         payload = {
             'tx_id': tx_id,
-            'sender': node_module.MINING_SENDER,
+            'sender': self.sender_public_hex,
             'recipient': 'recipient',
             'file_name': 'document.txt',
             'file_path': './uploads/nonexistent.txt',
-            'signature': '',
             'file_owner': invalid_owner,
         }
+        payload = self._attach_signature(payload)
 
         response = self.client.post('/transactions/new', json=payload)
         self.assertEqual(response.status_code, 400, response.data)
@@ -425,13 +504,13 @@ class UploadSecurityTestCase(unittest.TestCase):
 
         rejected_payload = {
             'tx_id': uuid.uuid4().hex,
-            'sender': node_module.MINING_SENDER,
+            'sender': self.sender_public_hex,
             'recipient': 'recipient',
             'file_name': 'document.txt',
             'file_path': './pending_uploads/document.txt',
-            'signature': '',
             'file_owner': 'attacker.example:80',
         }
+        rejected_payload = self._attach_signature(rejected_payload)
 
         rejected_response = self.client.post('/transactions/new', json=rejected_payload)
         self.assertEqual(rejected_response.status_code, 400, rejected_response.data)
@@ -441,13 +520,13 @@ class UploadSecurityTestCase(unittest.TestCase):
 
         accepted_payload = {
             'tx_id': uuid.uuid4().hex,
-            'sender': node_module.MINING_SENDER,
+            'sender': self.sender_public_hex,
             'recipient': 'recipient',
             'file_name': 'document.txt',
             'file_path': './pending_uploads/document.txt',
-            'signature': '',
             'file_owner': 'ally.example:5000',
         }
+        accepted_payload = self._attach_signature(accepted_payload)
 
         accepted_response = self.client.post('/transactions/new', json=accepted_payload)
         self.assertEqual(accepted_response.status_code, 201, accepted_response.data)
@@ -458,9 +537,8 @@ class UploadSecurityTestCase(unittest.TestCase):
     def test_malformed_encryption_payload_rejected_and_decrypt_succeeds_for_valid_upload(self):
         malformed_tx_id = uuid.uuid4().hex
         invalid_payload = {
-            'sender': node_module.MINING_SENDER,
+            'sender': self.sender_public_hex,
             'recipient': 'recipient',
-            'signature': '',
             'tx_id': malformed_tx_id,
             'alias': '',
             'recipient_alias': '',
@@ -471,6 +549,7 @@ class UploadSecurityTestCase(unittest.TestCase):
             'enc_nonce_b64': 'also_bad',
             'enc_tag_b64': '!!!',
         }
+        invalid_payload = self._attach_signature(invalid_payload)
 
         malformed_response = self.client.post(
             '/node/upload',
@@ -491,9 +570,8 @@ class UploadSecurityTestCase(unittest.TestCase):
         valid_tx_id = uuid.uuid4().hex
         valid_file_name = 'valid.bin'
         valid_payload = {
-            'sender': node_module.MINING_SENDER,
+            'sender': self.sender_public_hex,
             'recipient': 'recipient',
-            'signature': '',
             'tx_id': valid_tx_id,
             'alias': '',
             'recipient_alias': '',
@@ -504,6 +582,7 @@ class UploadSecurityTestCase(unittest.TestCase):
             'enc_nonce_b64': base64.b64encode(nonce).decode('ascii'),
             'enc_tag_b64': base64.b64encode(tag).decode('ascii'),
         }
+        valid_payload = self._attach_signature(valid_payload)
 
         valid_response = self.client.post(
             '/node/upload',

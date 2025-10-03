@@ -485,6 +485,7 @@ class Blockchain:
         is_sensitive="0",
         file_owner=None,
         stored_file_name=None,
+        allow_system_transaction=False,
     ):
         with self._lock:
             if self.transaction_exists(tx_id):
@@ -506,6 +507,9 @@ class Blockchain:
                 stored_file_name = os.path.basename(os.path.normpath(file_path))
             if stored_file_name:
                 transaction["stored_file_name"] = stored_file_name
+
+            if sender == MINING_SENDER and not allow_system_transaction:
+                raise ValueError("Transactions using the mining sender must be created internally")
 
             if sender != MINING_SENDER:
                 signable = self._build_signable_transaction(transaction)
@@ -1455,7 +1459,8 @@ def mine():
         file_path=None,
         alias="Manually mined block",
         recipient_alias="",
-        signature=""
+        signature="",
+        allow_system_transaction=True,
     )
     prev_hash = blockchain.hash(last_block)
     try:
@@ -1515,6 +1520,9 @@ def node_upload():
     alias = request.form.get('alias', '')
     recipient_alias = request.form.get('recipient_alias', '')
     is_sensitive = request.form.get('is_sensitive', '0')
+
+    if sender == MINING_SENDER:
+        return jsonify({"error": "Reserved sender identifier is not permitted"}), 400
 
     file_name = request.form.get('file_name', '')
     if not file_name:
@@ -1708,6 +1716,9 @@ def new_transaction():
     required = ["tx_id", "sender", "recipient", "file_name", "file_path", "signature"]
     if not all(key in data for key in required):
         return "Missing values", 400
+
+    if data.get("sender") == MINING_SENDER:
+        return jsonify({"error": "Reserved sender identifier is not permitted"}), 400
 
     try:
         data["file_name"] = _ensure_safe_filename(data["file_name"])
