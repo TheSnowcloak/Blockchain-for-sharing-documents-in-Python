@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 from flask import Flask, jsonify, request, render_template, send_from_directory, send_file, abort
 from flask_cors import CORS
 from collections import OrderedDict, deque
+from collections.abc import Mapping
 from Crypto.PublicKey import RSA
 from Crypto.Hash import SHA256
 from Crypto.Signature import pkcs1_15
@@ -559,18 +560,81 @@ class Blockchain:
         payload = json.dumps(block, sort_keys=True).encode()
         return SHA256.new(payload).hexdigest()
 
-    def valid_chain(self, chain):
-        if not chain:
+    _REQUIRED_BLOCK_FIELDS = {"index", "timestamp", "transactions", "proof", "previous_hash"}
+
+    def _is_valid_block_structure(self, block, position):
+        if not isinstance(block, Mapping):
+            logging.warning("Invalid block at position %s: expected mapping, got %s", position, type(block).__name__)
             return False
+
+        missing = self._REQUIRED_BLOCK_FIELDS.difference(block.keys())
+        if missing:
+            logging.warning(
+                "Block at position %s missing required fields: %s",
+                position,
+                ", ".join(sorted(missing)),
+            )
+            return False
+
+        transactions_value = block.get("transactions")
+        if not isinstance(transactions_value, list):
+            logging.warning(
+                "Block at position %s has invalid transactions field type: %s",
+                position,
+                type(transactions_value).__name__,
+            )
+            return False
+
+        validator_signatures = block.get("validator_signatures")
+        if validator_signatures is not None and not isinstance(validator_signatures, list):
+            logging.warning(
+                "Block at position %s has invalid validator_signatures type: %s",
+                position,
+                type(validator_signatures).__name__,
+            )
+            return False
+
+        return True
+
+    def valid_chain(self, chain):
+        if not isinstance(chain, (list, tuple)):
+            logging.warning(
+                "Invalid chain structure: expected list/tuple, got %s",
+                type(chain).__name__ if chain is not None else type(chain),
+            )
+            return False
+
+        if not chain:
+            logging.warning("Invalid chain structure: sequence is empty")
+            return False
+
+        if not self._is_valid_block_structure(chain[0], 0):
+            return False
+
         last_block = chain[0]
         if not self.verify_block_signatures(last_block):
             return False
-        for block in chain[1:]:
-            if block.get("previous_hash") != self.hash(last_block):
+
+        for position, block in enumerate(chain[1:], start=1):
+            if not self._is_valid_block_structure(block, position):
                 return False
+
+            previous_hash = block["previous_hash"]
+            computed_hash = self.hash(last_block)
+            if previous_hash != computed_hash:
+                logging.warning(
+                    "Block at position %s has mismatched previous_hash: expected %s, got %s",
+                    position,
+                    computed_hash,
+                    previous_hash,
+                )
+                return False
+
             if not self.verify_block_signatures(block):
                 return False
+
             last_block = block
+
         return True
 
     def _record_sync_failure(self, operation, netloc, filename=None, error=None, attempt=None, stage="immediate"):
@@ -757,14 +821,24 @@ class Blockchain:
 
         for netloc in trusted_nodes:
             chain_data = self._fetch_chain_with_retry(netloc)
-            if chain_data and len(chain_data) > best_length and self.valid_chain(chain_data):
+            if not chain_data:
+                continue
+            if not isinstance(chain_data, (list, tuple)) or not all(isinstance(block, Mapping) for block in chain_data):
+                logging.warning("Skipping invalid chain response from trusted peer %s", netloc)
+                continue
+            if len(chain_data) > best_length and self.valid_chain(chain_data):
                 best_chain = chain_data
                 best_length = len(chain_data)
 
         if best_chain is None:
             for netloc in untrusted_nodes:
                 chain_data = self._fetch_chain_with_retry(netloc)
-                if chain_data and len(chain_data) > best_length and self.valid_chain(chain_data):
+                if not chain_data:
+                    continue
+                if not isinstance(chain_data, (list, tuple)) or not all(isinstance(block, Mapping) for block in chain_data):
+                    logging.warning("Skipping invalid chain response from peer %s", netloc)
+                    continue
+                if len(chain_data) > best_length and self.valid_chain(chain_data):
                     best_chain = chain_data
                     best_length = len(chain_data)
 
