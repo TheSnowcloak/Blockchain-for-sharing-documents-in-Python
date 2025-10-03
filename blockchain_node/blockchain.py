@@ -1368,6 +1368,7 @@ app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 
 _TRUSTED_MANAGEMENT_FORBIDDEN_MESSAGE = "Caller is not authorized to manage trusted nodes"
 _VALIDATOR_MANAGEMENT_FORBIDDEN_MESSAGE = "Caller is not authorized to manage validator identity"
+_NODE_MANAGEMENT_FORBIDDEN_MESSAGE = "Caller is not authorized to manage nodes"
 
 
 def _request_from_trusted():
@@ -1407,6 +1408,10 @@ def _request_from_localhost():
 
 def _trusted_management_forbidden_response():
     return jsonify({"message": _TRUSTED_MANAGEMENT_FORBIDDEN_MESSAGE}), 403
+
+
+def _node_management_forbidden_response():
+    return jsonify({"message": _NODE_MANAGEMENT_FORBIDDEN_MESSAGE}), 403
 
 @app.route('/')
 def node_index():
@@ -1895,6 +1900,8 @@ def decrypt_file(tx_id):
 
 @app.route('/nodes/register', methods=['POST'])
 def register_nodes():
+    if not (_request_from_trusted() or _request_from_localhost()):
+        return _node_management_forbidden_response()
     if request.is_json:
         val   = request.get_json()
         node_netlocs = val.get('nodes')
@@ -1916,6 +1923,8 @@ def register_nodes():
 
 @app.route('/nodes/remove', methods=['POST'])
 def remove_node():
+    if not (_request_from_trusted() or _request_from_localhost()):
+        return _node_management_forbidden_response()
     d = request.get_json() or {}
     if 'node' not in d:
         return jsonify({"message":"Missing node address"}),400
@@ -1929,6 +1938,8 @@ def remove_node():
 
 @app.route('/nodes/get', methods=['GET'])
 def get_nodes():
+    if not (_request_from_trusted() or _request_from_localhost()):
+        return _node_management_forbidden_response()
     with blockchain.lock:
         nodes_snapshot = list(blockchain.nodes)
     return jsonify({"total_nodes": nodes_snapshot}),200
