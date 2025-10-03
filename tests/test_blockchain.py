@@ -67,6 +67,13 @@ def _sign_transaction(module, private_key_hex, data):
     return binascii.hexlify(signature).decode('ascii')
 
 
+def _generate_rsa_keypair():
+    key = RSA.generate(1024)
+    private_hex = binascii.hexlify(key.export_key(format='DER')).decode('ascii')
+    public_hex = binascii.hexlify(key.publickey().export_key(format='DER')).decode('ascii')
+    return private_hex, public_hex
+
+
 def test_create_block_normalizes_missing_file(isolated_blockchain):
     bc, module = isolated_blockchain
 
@@ -698,3 +705,61 @@ def test_validator_key_rotation_preserves_signature_history(isolated_blockchain)
 
     assert bc.verify_block_signatures(block_one)
     assert not bc.verify_block_signatures(block_two)
+
+
+def test_transactions_endpoint_reports_location_states(isolated_blockchain):
+    bc, module = isolated_blockchain
+    client = module.app.test_client()
+
+    sender_private_hex, sender_public_hex = _generate_rsa_keypair()
+
+    tx_id = "tx-shared-123"
+    base_payload = {
+        "tx_id": tx_id,
+        "sender": sender_public_hex,
+        "recipient": "recipient-public",
+        "file_name": "document.txt",
+        "file_path": f"{module.PENDING_FOLDER}/document.txt",
+        "alias": "",
+        "recipient_alias": "",
+        "is_sensitive": "0",
+    }
+    signature = _sign_transaction(module, sender_private_hex, base_payload)
+    base_payload["signature"] = signature
+
+    genesis_index = bc.last_block["index"]
+
+    first_response = client.post(
+        "/transactions/new",
+        json={**base_payload, "skip_broadcast": True},
+    )
+    assert first_response.status_code == 201
+    first_body = first_response.get_json()
+    assert first_body["added"] is True
+    assert first_body["mined"] is False
+    assert first_body["location"] == genesis_index + 1
+    assert "will be added" in first_body["message"]
+
+    second_response = client.post(
+        "/transactions/new",
+        json={**base_payload, "skip_broadcast": True},
+    )
+    assert second_response.status_code == 200
+    second_body = second_response.get_json()
+    assert second_body["added"] is False
+    assert second_body["location"] == "pending"
+    assert "pending" in second_body["message"].lower()
+
+    prev_hash = module.Blockchain.hash(module.blockchain.last_block)
+    block = module.blockchain.create_block(proof=200, previous_hash=prev_hash)
+    assert block["index"] == genesis_index + 1
+
+    third_response = client.post(
+        "/transactions/new",
+        json={**base_payload, "skip_broadcast": True},
+    )
+    assert third_response.status_code == 200
+    third_body = third_response.get_json()
+    assert third_body["added"] is False
+    assert third_body["location"] == block["index"]
+    assert "already accepted" in third_body["message"]
