@@ -342,6 +342,91 @@ def test_localhost_can_manage_nodes(isolated_app):
     assert "192.0.2.200:5000" not in blockchain.nodes
 
 
+
+def test_consensus_requires_authorized_caller(isolated_app, monkeypatch):
+    module = isolated_app
+    client = module.app.test_client()
+    forbidden_message = module._NODE_MANAGEMENT_FORBIDDEN_MESSAGE
+
+    resolve_calls = []
+
+    def fake_resolve_conflicts():
+        resolve_calls.append('resolve')
+        return False
+
+    monkeypatch.setattr(module.blockchain, 'resolve_conflicts', fake_resolve_conflicts)
+
+    untrusted_response = client.get(
+        '/nodes/resolve',
+        environ_base={'REMOTE_ADDR': '198.51.100.25'},
+    )
+    assert untrusted_response.status_code == 403
+    assert untrusted_response.get_json()['message'] == forbidden_message
+    assert resolve_calls == []
+
+    module.blockchain.add_trusted_node('192.0.2.60:5000')
+
+    trusted_response = client.get(
+        '/nodes/resolve',
+        environ_base={'REMOTE_ADDR': '192.0.2.60'},
+    )
+    assert trusted_response.status_code == 200
+    assert trusted_response.get_json()['message'] in {
+        'Chain replaced',
+        'Chain is authoritative',
+    }
+    assert resolve_calls == ['resolve']
+
+    localhost_response = client.get(
+        '/nodes/resolve',
+        environ_base={'REMOTE_ADDR': '127.0.0.1'},
+    )
+    assert localhost_response.status_code == 200
+    assert localhost_response.get_json()['message'] in {
+        'Chain replaced',
+        'Chain is authoritative',
+    }
+    assert resolve_calls == ['resolve', 'resolve']
+
+
+def test_manual_sync_requires_authorized_caller(isolated_app, monkeypatch):
+    module = isolated_app
+    client = module.app.test_client()
+    forbidden_message = module._NODE_MANAGEMENT_FORBIDDEN_MESSAGE
+
+    sync_calls = []
+
+    def fake_sync_files():
+        sync_calls.append('sync')
+
+    monkeypatch.setattr(module.blockchain, 'sync_files', fake_sync_files)
+
+    untrusted_response = client.get(
+        '/sync',
+        environ_base={'REMOTE_ADDR': '198.51.100.26'},
+    )
+    assert untrusted_response.status_code == 403
+    assert untrusted_response.get_json()['message'] == forbidden_message
+    assert sync_calls == []
+
+    module.blockchain.add_trusted_node('192.0.2.70:5000')
+
+    trusted_response = client.get(
+        '/sync',
+        environ_base={'REMOTE_ADDR': '192.0.2.70'},
+    )
+    assert trusted_response.status_code == 200
+    assert trusted_response.get_json()['message'] == 'sync done'
+    assert sync_calls == ['sync']
+
+    localhost_response = client.get(
+        '/sync',
+        environ_base={'REMOTE_ADDR': '127.0.0.1'},
+    )
+    assert localhost_response.status_code == 200
+    assert localhost_response.get_json()['message'] == 'sync done'
+    assert sync_calls == ['sync', 'sync']
+
 def test_validator_configure_rejects_untrusted_caller(isolated_app):
     module = isolated_app
     client = module.app.test_client()
