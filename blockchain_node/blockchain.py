@@ -1090,22 +1090,34 @@ class Blockchain:
         return key_id
 
     def set_validator_identity(self, validator_id, private_key_hex, netloc=None, public_key_hex=None):
-        self.validator_id = validator_id
-        self.validator_private_key_hex = private_key_hex
+        normalized_netloc = None
         if netloc:
             normalized_netloc = normalize_netloc(netloc)
+
+        derived_public_key_hex = None
+        if private_key_hex:
+            try:
+                derived_public_key_hex = self.derive_public_key_hex(private_key_hex)
+            except (ValueError, TypeError, binascii.Error) as exc:
+                logging.error(f"Could not derive public key from supplied private key: {exc}")
+
+        resolved_public_key_hex = None
+        if public_key_hex:
+            if derived_public_key_hex and derived_public_key_hex.lower() != public_key_hex.lower():
+                raise ValueError("Provided public key does not match the supplied private key")
+            resolved_public_key_hex = public_key_hex
+        else:
+            resolved_public_key_hex = derived_public_key_hex
+
+        self.validator_id = validator_id
+        self.validator_private_key_hex = private_key_hex
+
+        if normalized_netloc:
             self.validator_netloc = normalized_netloc
             if normalized_netloc not in self.trusted_nodes:
                 self.add_trusted_node(normalized_netloc)
 
-        if public_key_hex:
-            self.validator_public_key_hex = public_key_hex
-        else:
-            try:
-                self.validator_public_key_hex = self.derive_public_key_hex(private_key_hex)
-            except (ValueError, TypeError, binascii.Error) as exc:
-                logging.error(f"Could not derive public key from supplied private key: {exc}")
-                self.validator_public_key_hex = None
+        self.validator_public_key_hex = resolved_public_key_hex
 
         if self.validator_id and self.validator_public_key_hex:
             try:
@@ -1204,10 +1216,19 @@ class Blockchain:
 
             try:
                 for position, block in enumerate(chain_data):
-                    if not self._is_valid_block_structure(block, position):
-                        continue
+                    if self._is_valid_block_structure(block, position):
+                        transactions = block.get("transactions", [])
+                    else:
+                        transactions = block.get("transactions")
+                        if not isinstance(transactions, list):
+                            logging.warning(
+                                "Block at position %s from %s has invalid transactions type %s",
+                                position,
+                                normalized_source,
+                                type(transactions).__name__,
+                            )
+                            continue
 
-                    transactions = block.get("transactions", [])
                     if not isinstance(transactions, list):
                         logging.warning(
                             "Block at position %s from %s has invalid transactions type %s",
@@ -1601,7 +1622,10 @@ def configure_validator():
     if not validator_id or not private_key:
         return jsonify({"message": "validator_id and private_key_hex are required"}), 400
 
-    blockchain.set_validator_identity(validator_id, private_key, netloc=netloc, public_key_hex=public_key)
+    try:
+        blockchain.set_validator_identity(validator_id, private_key, netloc=netloc, public_key_hex=public_key)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
 
     return jsonify({
         "message": "Validator identity updated",
