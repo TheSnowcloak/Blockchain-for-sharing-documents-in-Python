@@ -1,4 +1,5 @@
 import binascii
+import json
 import importlib
 import os
 import sys
@@ -8,6 +9,8 @@ from pathlib import Path
 
 import pytest
 from Crypto.PublicKey import RSA
+from Crypto.Signature import pkcs1_15
+from Crypto.Hash import SHA256
 
 # Ensure repository root is on sys.path when running inside temporary dirs
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +50,23 @@ def isolated_blockchain(tmp_path, monkeypatch):
     return bc, blockchain_module
 
 
+def _sign_transaction(module, private_key_hex, data):
+    payload = {
+        'tx_id': data['tx_id'],
+        'sender': data['sender'],
+        'recipient': data['recipient'],
+        'file_name': data['file_name'],
+        'alias': data.get('alias', ''),
+        'recipient_alias': data.get('recipient_alias', ''),
+        'is_sensitive': data.get('is_sensitive', '0'),
+    }
+    signable = module.blockchain._build_signable_transaction(payload)
+    digest = SHA256.new(json.dumps(signable, sort_keys=True).encode('utf-8'))
+    private_key = RSA.import_key(binascii.unhexlify(private_key_hex))
+    signature = pkcs1_15.new(private_key).sign(digest)
+    return binascii.hexlify(signature).decode('ascii')
+
+
 def test_create_block_normalizes_missing_file(isolated_blockchain):
     bc, module = isolated_blockchain
 
@@ -62,6 +82,7 @@ def test_create_block_normalizes_missing_file(isolated_blockchain):
         signature="",
         is_sensitive="0",
         file_owner="127.0.0.1:5000",
+        allow_system_transaction=True,
     )
 
     block = bc.create_block(proof=200, previous_hash="hash")
@@ -210,20 +231,26 @@ def test_upload_host_validation_and_sync_uses_validator_owner(isolated_blockchai
     bc.add_trusted_node("owner-host:6001")
     client = module.app.test_client()
 
-    base_form = {
-        "sender": module.MINING_SENDER,
-        "recipient": "recipient",
-        "signature": "",
-        "alias": "",
-        "recipient_alias": "",
-        "is_sensitive": "0",
-        "file_name": "sync.txt",
-        "file_path": "./pending_uploads/ignored.txt",
-    }
+    sender = bc.validator_public_key_hex
+    private_key_hex = bc.validator_private_key_hex
+
+    def build_form(tx_id):
+        form = {
+            "sender": sender,
+            "recipient": "recipient",
+            "alias": "",
+            "recipient_alias": "",
+            "is_sensitive": "0",
+            "file_name": "sync.txt",
+            "file_path": "./pending_uploads/ignored.txt",
+            "tx_id": tx_id,
+        }
+        form["signature"] = _sign_transaction(module, private_key_hex, form)
+        return form
 
     spoof_resp = client.post(
         "/node/upload",
-        data={**base_form, "tx_id": uuid.uuid4().hex, "file": (BytesIO(b"spoof"), "sync.txt")},
+        data={**build_form(uuid.uuid4().hex), "file": (BytesIO(b"spoof"), "sync.txt")},
         content_type="multipart/form-data",
         base_url="http://peer-b:5000",
         environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
@@ -235,7 +262,7 @@ def test_upload_host_validation_and_sync_uses_validator_owner(isolated_blockchai
     good_tx_id = uuid.uuid4().hex
     valid_resp = client.post(
         "/node/upload",
-        data={**base_form, "tx_id": good_tx_id, "file": (BytesIO(b"payload"), "sync.txt")},
+        data={**build_form(good_tx_id), "file": (BytesIO(b"payload"), "sync.txt")},
         content_type="multipart/form-data",
         base_url="http://owner-host:6001",
         environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
@@ -581,6 +608,7 @@ def test_file_route_and_sync_use_stored_filename(isolated_blockchain, monkeypatc
         is_sensitive="0",
         file_owner="peer-a:5000",
         stored_file_name=stored_basename,
+        allow_system_transaction=True,
     )
 
     block = bc.create_block(proof=200, previous_hash="hash")
