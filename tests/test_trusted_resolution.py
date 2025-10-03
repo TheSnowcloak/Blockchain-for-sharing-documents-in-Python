@@ -42,6 +42,41 @@ def _generate_key_pair_hex():
     return private_hex, public_hex
 
 
+def test_mine_requires_trusted_or_local_request(isolated_app, monkeypatch):
+    module = isolated_app
+    blockchain = module.blockchain
+
+    original_add_transaction = blockchain.__class__.add_transaction
+
+    def patched_add_transaction(self, tx_id, sender, recipient, file_name, *args, **kwargs):
+        if file_name is None:
+            file_name = "mining-reward"
+        return original_add_transaction(self, tx_id, sender, recipient, file_name, *args, **kwargs)
+
+    monkeypatch.setattr(blockchain.__class__, "add_transaction", patched_add_transaction)
+
+    private_hex, public_hex = _generate_key_pair_hex()
+    blockchain.set_validator_identity("trusted-validator", private_hex, public_key_hex=public_hex)
+
+    client = module.app.test_client()
+
+    untrusted_response = client.get(
+        "/mine",
+        environ_base={"REMOTE_ADDR": "203.0.113.77"},
+    )
+    assert untrusted_response.status_code == 403
+
+    blockchain.add_trusted_node("203.0.113.10:5000")
+
+    trusted_response = client.get(
+        "/mine",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+    assert trusted_response.status_code == 200
+    trusted_body = trusted_response.get_json()
+    assert trusted_body.get("message") == "New block forged"
+
+
 def test_hostname_resolution_allows_trusted_access(isolated_app, monkeypatch):
     module = isolated_app
     blockchain = module.blockchain

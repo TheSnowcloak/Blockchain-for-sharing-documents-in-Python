@@ -1600,6 +1600,7 @@ app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 _TRUSTED_MANAGEMENT_FORBIDDEN_MESSAGE = "Caller is not authorized to manage trusted nodes"
 _VALIDATOR_MANAGEMENT_FORBIDDEN_MESSAGE = "Caller is not authorized to manage validator identity"
 _NODE_MANAGEMENT_FORBIDDEN_MESSAGE = "Caller is not authorized to manage nodes"
+_MINING_FORBIDDEN_MESSAGE = "Caller is not authorized to mine blocks"
 
 
 def _request_from_trusted():
@@ -1710,6 +1711,9 @@ def mine():
     """
     Example method to auto-mine a new block with a mining reward.
     """
+    if not (_request_from_trusted() or _request_from_localhost()):
+        return jsonify({"message": _MINING_FORBIDDEN_MESSAGE}), 403
+
     if not blockchain.is_authorized_validator():
         return jsonify({"message": "This node is not authorized to propose blocks."}), 403
 

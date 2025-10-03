@@ -109,6 +109,8 @@ After at least one node is running (see **Start the node** above), use the follo
 #### Trusted nodes (`/trusted_nodes/...`)
 Trusted nodes can access sensitive data and participate in Proof-of-Authority (PoA) consensus.
 
+> **Mining access control:** Manual mining via the `/mine` endpoint is restricted to trusted nodes (or localhost). Remote, untrusted callers receive `403 Forbidden`. Ensure the machine or IP that initiates mining appears in the trusted node list before invoking the endpoint.
+
 1. Register a trusted node:
    ```sh
    curl -X POST http://127.0.0.1:5000/trusted_nodes/register \
