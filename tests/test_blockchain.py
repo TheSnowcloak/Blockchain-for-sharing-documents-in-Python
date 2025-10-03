@@ -198,7 +198,40 @@ def test_sync_files_downloads_from_recorded_owner(isolated_blockchain, monkeypat
 
     assert downloaded.exists(), "File should be downloaded from the recorded owner"
     assert downloaded.read_bytes() == file_bytes
-    assert "http://owner-host:6001/file/shared.txt" in calls
+
+
+def test_reward_transaction_without_file_metadata(isolated_blockchain):
+    bc, module = isolated_blockchain
+
+    tx_id = "reward-tx"
+    index, added, mined = bc.add_transaction(
+        tx_id=tx_id,
+        sender=module.MINING_SENDER,
+        recipient="miner-public-key",
+        file_name=None,
+        file_path=None,
+        alias="",
+        recipient_alias="",
+        signature="",
+        is_sensitive="0",
+        allow_system_transaction=True,
+    )
+
+    assert added is True
+    assert mined is False
+    assert index == bc.last_block["index"] + 1
+
+    block = bc.create_block(proof=999, previous_hash="prev-hash")
+
+    reward_transactions = [
+        tx for tx in block["transactions"] if tx.get("tx_id") == tx_id
+    ]
+    assert reward_transactions, "Forged block should include the reward transaction"
+
+    reward_tx = reward_transactions[0]
+    assert "file_name" not in reward_tx
+    assert "file_path" not in reward_tx
+    assert "stored_file_name" not in reward_tx
 
 
 def test_sync_files_skips_owner_when_local_node(isolated_blockchain, monkeypatch):

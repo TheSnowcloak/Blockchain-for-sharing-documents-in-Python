@@ -511,43 +511,53 @@ class Blockchain:
                 logging.info(f"Transaction {tx_id} already known. Duplicate ignored.")
                 return existing_location, False, False
 
-            try:
-                safe_file_name = _ensure_safe_filename(file_name)
-            except ValueError as exc:
-                raise ValueError("Invalid file_name supplied") from exc
+            safe_file_name = None
+            canonical_stored_name = None
 
-            canonical_stored_name = _derive_canonical_stored_name(tx_id, safe_file_name)
+            if file_name:
+                try:
+                    safe_file_name = _ensure_safe_filename(file_name)
+                except ValueError as exc:
+                    raise ValueError("Invalid file_name supplied") from exc
+                canonical_stored_name = _derive_canonical_stored_name(tx_id, safe_file_name)
+            elif not allow_system_transaction:
+                raise ValueError("Invalid file_name supplied")
 
             transaction = OrderedDict({
                 "tx_id": tx_id,
                 "sender": sender,
                 "recipient": recipient,
-                "file_name": safe_file_name,
-                "file_path": file_path,
                 "alias": alias,
                 "recipient_alias": recipient_alias,
                 "is_sensitive": is_sensitive,
             })
 
-            if stored_file_name:
-                try:
-                    provided_stored = _ensure_safe_filename(stored_file_name)
-                except ValueError as exc:
-                    raise ValueError("Invalid stored_file_name supplied") from exc
-            else:
-                provided_stored = canonical_stored_name
+            if safe_file_name is not None:
+                transaction["file_name"] = safe_file_name
 
-            if provided_stored != canonical_stored_name:
-                logging.warning(
-                    "Stored filename mismatch for tx %s; expected %s, received %s. Using canonical value.",
-                    tx_id,
-                    canonical_stored_name,
-                    provided_stored,
-                )
+            if canonical_stored_name is not None:
+                if stored_file_name:
+                    try:
+                        provided_stored = _ensure_safe_filename(stored_file_name)
+                    except ValueError as exc:
+                        raise ValueError("Invalid stored_file_name supplied") from exc
+                else:
+                    provided_stored = canonical_stored_name
 
-            transaction["stored_file_name"] = canonical_stored_name
+                if provided_stored != canonical_stored_name:
+                    logging.warning(
+                        "Stored filename mismatch for tx %s; expected %s, received %s. Using canonical value.",
+                        tx_id,
+                        canonical_stored_name,
+                        provided_stored,
+                    )
+
+                transaction["stored_file_name"] = canonical_stored_name
 
             if file_path:
+                if canonical_stored_name is None:
+                    raise ValueError("file_path supplied without file metadata")
+
                 if _is_safe_subpath(file_path, PENDING_FOLDER):
                     canonical_path = os.path.join(PENDING_FOLDER, canonical_stored_name)
                 elif _is_safe_subpath(file_path, UPLOAD_FOLDER):
