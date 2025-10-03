@@ -1,9 +1,11 @@
 import importlib
 import os
 import sys
+import binascii
 from pathlib import Path
 
 import pytest
+from Crypto.PublicKey import RSA
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -31,6 +33,13 @@ def isolated_app(tmp_path, monkeypatch):
     blockchain_instance.trusted_nodes = set()
 
     return module
+
+
+def _generate_key_pair_hex():
+    key = RSA.generate(1024)
+    private_hex = binascii.hexlify(key.export_key(format="DER")).decode("ascii")
+    public_hex = binascii.hexlify(key.publickey().export_key(format="DER")).decode("ascii")
+    return private_hex, public_hex
 
 
 def test_hostname_resolution_allows_trusted_access(isolated_app, monkeypatch):
@@ -458,6 +467,8 @@ def test_validator_configure_allows_trusted_caller(isolated_app):
 
     client = module.app.test_client()
 
+    private_hex, public_hex = _generate_key_pair_hex()
+
     response_get = client.get(
         "/validator/configure",
         environ_base={"REMOTE_ADDR": "192.0.2.99"},
@@ -468,9 +479,9 @@ def test_validator_configure_allows_trusted_caller(isolated_app):
         "/validator/configure",
         json={
             "validator_id": "validator-1",
-            "private_key_hex": "deadbeef",
+            "private_key_hex": private_hex,
             "netloc": "192.0.2.99:5000",
-            "public_key_hex": "cafebabe",
+            "public_key_hex": public_hex,
         },
         environ_base={"REMOTE_ADDR": "192.0.2.99"},
     )
@@ -479,12 +490,14 @@ def test_validator_configure_allows_trusted_caller(isolated_app):
     payload = response_post.get_json()
     assert payload["validator_id"] == "validator-1"
     assert payload["netloc"] == "192.0.2.99:5000"
-    assert payload["public_key_hex"] == "cafebabe"
+    assert payload["public_key_hex"].lower() == public_hex.lower()
 
 
 def test_validator_configure_allows_localhost(isolated_app):
     module = isolated_app
     client = module.app.test_client()
+
+    private_hex, public_hex = _generate_key_pair_hex()
 
     response_get = client.get(
         "/validator/configure",
@@ -496,10 +509,45 @@ def test_validator_configure_allows_localhost(isolated_app):
         "/validator/configure",
         json={
             "validator_id": "validator-local",
-            "private_key_hex": "feedface",
+            "private_key_hex": private_hex,
         },
         environ_base={"REMOTE_ADDR": "127.0.0.1"},
     )
 
     assert response_post.status_code == 200
     assert module.blockchain.validator_id == "validator-local"
+    assert module.blockchain.validator_public_key_hex.lower() == public_hex.lower()
+
+
+def test_validator_configure_rejects_invalid_private_key_hex(isolated_app):
+    module = isolated_app
+    client = module.app.test_client()
+
+    invalid_response = client.post(
+        "/validator/configure",
+        json={
+            "validator_id": "validator-invalid",
+            "private_key_hex": "zzzz",
+        },
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert invalid_response.status_code == 400
+    body = invalid_response.get_json()
+    assert "derive public key" in body["message"].lower()
+
+    private_hex, public_hex = _generate_key_pair_hex()
+
+    valid_response = client.post(
+        "/validator/configure",
+        json={
+            "validator_id": "validator-valid",
+            "private_key_hex": private_hex,
+        },
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert valid_response.status_code == 200
+    payload = valid_response.get_json()
+    assert payload["validator_id"] == "validator-valid"
+    assert payload["public_key_hex"].lower() == public_hex.lower()

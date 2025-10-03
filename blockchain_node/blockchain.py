@@ -1110,7 +1110,9 @@ class Blockchain:
             try:
                 derived_public_key_hex = self.derive_public_key_hex(private_key_hex)
             except (ValueError, TypeError, binascii.Error) as exc:
-                logging.error(f"Could not derive public key from supplied private key: {exc}")
+                raise ValueError("Could not derive public key from supplied private key") from exc
+            if derived_public_key_hex is None:
+                raise ValueError("Could not derive public key from supplied private key")
 
         resolved_public_key_hex = None
         if public_key_hex:
