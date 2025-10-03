@@ -207,6 +207,41 @@ def test_untrusted_caller_blocked_from_trusted_management(isolated_app):
     assert removal.get_json()["message"] == forbidden_message
 
 
+def test_untrusted_caller_blocked_from_basic_node_management(isolated_app):
+    module = isolated_app
+    client = module.app.test_client()
+
+    forbidden_message = module._NODE_MANAGEMENT_FORBIDDEN_MESSAGE
+
+    module.blockchain.add_node("198.51.100.10:5000")
+
+    register_response = client.post(
+        "/nodes/register",
+        json={"nodes": ["198.51.100.11:5000"]},
+        environ_base={"REMOTE_ADDR": "198.51.100.50"},
+    )
+
+    assert register_response.status_code == 403
+    assert register_response.get_json()["message"] == forbidden_message
+
+    get_response = client.get(
+        "/nodes/get",
+        environ_base={"REMOTE_ADDR": "198.51.100.50"},
+    )
+
+    assert get_response.status_code == 403
+    assert get_response.get_json()["message"] == forbidden_message
+
+    removal_response = client.post(
+        "/nodes/remove",
+        json={"node": "198.51.100.10:5000"},
+        environ_base={"REMOTE_ADDR": "198.51.100.50"},
+    )
+
+    assert removal_response.status_code == 403
+    assert removal_response.get_json()["message"] == forbidden_message
+
+
 def test_trusted_caller_can_manage_trusted_nodes(isolated_app):
     module = isolated_app
     blockchain = module.blockchain
@@ -235,6 +270,76 @@ def test_trusted_caller_can_manage_trusted_nodes(isolated_app):
 
     assert removal.status_code == 200
     assert "203.0.113.201:5000" not in blockchain.trusted_nodes
+
+
+def test_trusted_caller_can_manage_nodes(isolated_app):
+    module = isolated_app
+    blockchain = module.blockchain
+
+    trusted_admin = "192.0.2.30:5000"
+    blockchain.add_trusted_node(trusted_admin)
+
+    client = module.app.test_client()
+
+    register_response = client.post(
+        "/nodes/register",
+        json={"nodes": ["203.0.113.150:5000"]},
+        environ_base={"REMOTE_ADDR": "192.0.2.30"},
+    )
+
+    assert register_response.status_code == 201
+    assert "203.0.113.150:5000" in blockchain.nodes
+
+    get_response = client.get(
+        "/nodes/get",
+        environ_base={"REMOTE_ADDR": "192.0.2.30"},
+    )
+
+    assert get_response.status_code == 200
+    body = get_response.get_json()
+    assert "203.0.113.150:5000" in body["total_nodes"]
+
+    removal_response = client.post(
+        "/nodes/remove",
+        json={"node": "203.0.113.150:5000"},
+        environ_base={"REMOTE_ADDR": "192.0.2.30"},
+    )
+
+    assert removal_response.status_code == 200
+    assert "203.0.113.150:5000" not in blockchain.nodes
+
+
+def test_localhost_can_manage_nodes(isolated_app):
+    module = isolated_app
+    blockchain = module.blockchain
+
+    client = module.app.test_client()
+
+    register_response = client.post(
+        "/nodes/register",
+        json={"nodes": ["192.0.2.200:5000"]},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert register_response.status_code == 201
+    assert "192.0.2.200:5000" in blockchain.nodes
+
+    get_response = client.get(
+        "/nodes/get",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert get_response.status_code == 200
+    assert "192.0.2.200:5000" in get_response.get_json()["total_nodes"]
+
+    removal_response = client.post(
+        "/nodes/remove",
+        json={"node": "192.0.2.200:5000"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert removal_response.status_code == 200
+    assert "192.0.2.200:5000" not in blockchain.nodes
 
 
 def test_validator_configure_rejects_untrusted_caller(isolated_app):
