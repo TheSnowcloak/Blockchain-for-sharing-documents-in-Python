@@ -101,6 +101,36 @@ def test_create_block_normalizes_missing_file(isolated_blockchain):
     assert tx["stored_file_name"] == "doc.txt"
 
 
+def test_pending_transactions_persist_after_reload(isolated_blockchain):
+    bc, module = isolated_blockchain
+
+    tx_id = f"pending-{uuid.uuid4()}"
+    _, added, mined = bc.add_transaction(
+        tx_id=tx_id,
+        sender=module.MINING_SENDER,
+        recipient="recipient_pub",
+        file_name="queued.txt",
+        file_path="./pending_uploads/queued.txt",
+        alias="",
+        recipient_alias="",
+        signature="",
+        is_sensitive="0",
+        file_owner="127.0.0.1:5000",
+        allow_system_transaction=True,
+    )
+
+    assert added is True
+    assert mined is False
+    assert os.path.exists(module.DATA_FILE)
+
+    reloaded_blockchain = module.Blockchain()
+    matching_transactions = [
+        tx for tx in reloaded_blockchain.transactions if tx.get("tx_id") == tx_id
+    ]
+    assert matching_transactions, "Pending transaction should persist after reload"
+    assert matching_transactions[0]["file_name"] == "queued.txt"
+
+
 def test_sync_files_downloads_from_recorded_owner(isolated_blockchain, monkeypatch):
     bc, module = isolated_blockchain
 
