@@ -235,3 +235,81 @@ def test_trusted_caller_can_manage_trusted_nodes(isolated_app):
 
     assert removal.status_code == 200
     assert "203.0.113.201:5000" not in blockchain.trusted_nodes
+
+
+def test_validator_configure_rejects_untrusted_caller(isolated_app):
+    module = isolated_app
+    client = module.app.test_client()
+
+    response_get = client.get(
+        "/validator/configure",
+        environ_base={"REMOTE_ADDR": "198.51.100.77"},
+    )
+    assert response_get.status_code == 403
+    assert response_get.get_json()["message"] == module._VALIDATOR_MANAGEMENT_FORBIDDEN_MESSAGE
+
+    response_post = client.post(
+        "/validator/configure",
+        json={
+            "validator_id": "validator-1",
+            "private_key_hex": "00",
+        },
+        environ_base={"REMOTE_ADDR": "198.51.100.77"},
+    )
+    assert response_post.status_code == 403
+    assert response_post.get_json()["message"] == module._VALIDATOR_MANAGEMENT_FORBIDDEN_MESSAGE
+
+
+def test_validator_configure_allows_trusted_caller(isolated_app):
+    module = isolated_app
+    blockchain = module.blockchain
+
+    blockchain.add_trusted_node("192.0.2.99:5000")
+
+    client = module.app.test_client()
+
+    response_get = client.get(
+        "/validator/configure",
+        environ_base={"REMOTE_ADDR": "192.0.2.99"},
+    )
+    assert response_get.status_code == 200
+
+    response_post = client.post(
+        "/validator/configure",
+        json={
+            "validator_id": "validator-1",
+            "private_key_hex": "deadbeef",
+            "netloc": "192.0.2.99:5000",
+            "public_key_hex": "cafebabe",
+        },
+        environ_base={"REMOTE_ADDR": "192.0.2.99"},
+    )
+
+    assert response_post.status_code == 200
+    payload = response_post.get_json()
+    assert payload["validator_id"] == "validator-1"
+    assert payload["netloc"] == "192.0.2.99:5000"
+    assert payload["public_key_hex"] == "cafebabe"
+
+
+def test_validator_configure_allows_localhost(isolated_app):
+    module = isolated_app
+    client = module.app.test_client()
+
+    response_get = client.get(
+        "/validator/configure",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert response_get.status_code == 200
+
+    response_post = client.post(
+        "/validator/configure",
+        json={
+            "validator_id": "validator-local",
+            "private_key_hex": "feedface",
+        },
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response_post.status_code == 200
+    assert module.blockchain.validator_id == "validator-local"

@@ -1367,6 +1367,7 @@ app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 
 
 _TRUSTED_MANAGEMENT_FORBIDDEN_MESSAGE = "Caller is not authorized to manage trusted nodes"
+_VALIDATOR_MANAGEMENT_FORBIDDEN_MESSAGE = "Caller is not authorized to manage validator identity"
 
 
 def _request_from_trusted():
@@ -1389,6 +1390,19 @@ def _request_from_trusted():
         if caller_ip in resolved_ips:
             return True
     return False
+
+
+def _request_from_localhost():
+    caller_ip = request.remote_addr
+    if not caller_ip:
+        return False
+
+    try:
+        ip_obj = ipaddress.ip_address(caller_ip)
+    except ValueError:
+        return False
+
+    return ip_obj.is_loopback
 
 
 def _trusted_management_forbidden_response():
@@ -1414,6 +1428,11 @@ def configure():
 
 @app.route('/validator/configure', methods=['GET', 'POST'])
 def configure_validator():
+    is_authorized_caller = _request_from_trusted() or _request_from_localhost()
+
+    if not is_authorized_caller:
+        return jsonify({"message": _VALIDATOR_MANAGEMENT_FORBIDDEN_MESSAGE}), 403
+
     if request.method == 'GET':
         return jsonify({
             "validator_id": blockchain.validator_id,
