@@ -21,6 +21,8 @@ class UploadSecurityTestCase(unittest.TestCase):
         self._original_validator_netloc = node_module.blockchain.validator_netloc
         self._original_local_netlocs = node_module.app.config.get('LOCAL_NODE_NETLOCS')
         self._original_env_local_netlocs = os.environ.get('LOCAL_NODE_NETLOCS')
+        self._original_nodes = set(node_module.blockchain.nodes)
+        self._original_trusted_nodes = set(node_module.blockchain.trusted_nodes)
         node_module.app.config['LOCAL_NODE_NETLOCS'] = 'localhost:5000'
         os.environ['LOCAL_NODE_NETLOCS'] = 'localhost:5000'
         self._created_paths = []
@@ -47,6 +49,8 @@ class UploadSecurityTestCase(unittest.TestCase):
             except FileNotFoundError:
                 pass
         node_module.blockchain.transactions = []
+        node_module.blockchain.nodes = set(self._original_nodes)
+        node_module.blockchain.trusted_nodes = set(self._original_trusted_nodes)
         node_module.blockchain.validator_netloc = self._original_validator_netloc
         if self._original_local_netlocs is None:
             node_module.app.config.pop('LOCAL_NODE_NETLOCS', None)
@@ -376,27 +380,27 @@ class UploadSecurityTestCase(unittest.TestCase):
         }
 
         response = self.client.post('/transactions/new', json=payload)
-        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.status_code, 400, response.data)
+        error_payload = response.get_json()
+        self.assertIsNotNone(error_payload)
+        self.assertIn('file_owner', error_payload.get('error', ''))
 
-        stored_tx = node_module.blockchain.get_transaction_by_id(tx_id)
-        self.assertIsNotNone(stored_tx)
-        self.assertNotEqual(stored_tx.get('file_owner'), invalid_owner)
-        self.assertNotIn('file_owner', stored_tx)
-
-        original_nodes = set(node_module.blockchain.nodes)
-        original_trusted = set(node_module.blockchain.trusted_nodes)
-
-        def restore_network():
-            node_module.blockchain.nodes = set(original_nodes)
-            node_module.blockchain.trusted_nodes = set(original_trusted)
-
-        self.addCleanup(restore_network)
+        self.assertIsNone(node_module.blockchain.get_transaction_by_id(tx_id))
 
         node_module.blockchain.nodes = {'peer-a:5000'}
         node_module.blockchain.trusted_nodes = set()
 
-        remote_tx = dict(stored_tx)
-        remote_tx['file_owner'] = invalid_owner
+        remote_tx = {
+            'tx_id': tx_id,
+            'sender': node_module.MINING_SENDER,
+            'recipient': 'recipient',
+            'file_name': 'document.txt',
+            'file_path': './uploads/nonexistent.txt',
+            'stored_file_name': 'document.txt',
+            'signature': '',
+            'file_owner': invalid_owner,
+            'is_sensitive': '0',
+        }
         block_payload = [{'transactions': [remote_tx]}]
 
         with mock.patch.object(node_module.blockchain, '_fetch_chain_with_retry', return_value=block_payload) as mock_fetch, \
@@ -414,6 +418,42 @@ class UploadSecurityTestCase(unittest.TestCase):
         self.assertEqual(scheduled_args[0], 'peer-a:5000')
         self.assertEqual(scheduled_kwargs.get('attempt'), 1)
         mock_clear.assert_not_called()
+
+    def test_transactions_validate_file_owner_against_known_peers(self):
+        node_module.blockchain.nodes = {'ally.example:5000'}
+        node_module.blockchain.trusted_nodes = {'trusted-peer:6001'}
+
+        rejected_payload = {
+            'tx_id': uuid.uuid4().hex,
+            'sender': node_module.MINING_SENDER,
+            'recipient': 'recipient',
+            'file_name': 'document.txt',
+            'file_path': './pending_uploads/document.txt',
+            'signature': '',
+            'file_owner': 'attacker.example:80',
+        }
+
+        rejected_response = self.client.post('/transactions/new', json=rejected_payload)
+        self.assertEqual(rejected_response.status_code, 400, rejected_response.data)
+        rejected_body = rejected_response.get_json()
+        self.assertIsNotNone(rejected_body)
+        self.assertIn('file_owner', rejected_body.get('error', ''))
+
+        accepted_payload = {
+            'tx_id': uuid.uuid4().hex,
+            'sender': node_module.MINING_SENDER,
+            'recipient': 'recipient',
+            'file_name': 'document.txt',
+            'file_path': './pending_uploads/document.txt',
+            'signature': '',
+            'file_owner': 'ally.example:5000',
+        }
+
+        accepted_response = self.client.post('/transactions/new', json=accepted_payload)
+        self.assertEqual(accepted_response.status_code, 201, accepted_response.data)
+        stored_tx = node_module.blockchain.get_transaction_by_id(accepted_payload['tx_id'])
+        self.assertIsNotNone(stored_tx)
+        self.assertEqual(stored_tx.get('file_owner'), 'ally.example:5000')
 
     def test_malformed_encryption_payload_rejected_and_decrypt_succeeds_for_valid_upload(self):
         malformed_tx_id = uuid.uuid4().hex

@@ -33,6 +33,7 @@ def isolated_blockchain(tmp_path, monkeypatch):
 
     bc = blockchain_module.Blockchain()
     blockchain_module.blockchain = bc
+    blockchain_module.app.config["LOCAL_NODE_NETLOCS"] = "127.0.0.1:5000"
     bc.transactions = []
     bc.nodes = set()
     bc.trusted_nodes = set()
@@ -565,6 +566,8 @@ def test_file_route_and_sync_use_stored_filename(isolated_blockchain, monkeypatc
     os.makedirs(os.path.dirname(pending_rel), exist_ok=True)
     with open(pending_rel, "wb") as handle:
         handle.write(file_bytes)
+
+    bc.nodes = {"peer-a:5000"}
 
     bc.add_transaction(
         tx_id="tx-stored",

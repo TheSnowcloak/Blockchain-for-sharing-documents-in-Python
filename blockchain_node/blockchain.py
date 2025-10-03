@@ -447,6 +447,31 @@ class Blockchain:
         )
         return OrderedDict((field, transaction_dict.get(field, "")) for field in signable_fields)
 
+    def _normalize_and_validate_file_owner(self, file_owner):
+        if not file_owner:
+            return None
+
+        try:
+            normalized = normalize_netloc(file_owner)
+        except ValueError as exc:
+            raise ValueError(f"Invalid file_owner value: {file_owner!r}") from exc
+
+        allowed = set(_get_configured_self_netlocs())
+        allowed.update(self.nodes)
+        allowed.update(self.trusted_nodes)
+
+        validator_netloc = self.validator_netloc
+        if validator_netloc:
+            try:
+                allowed.add(normalize_netloc(validator_netloc))
+            except ValueError:
+                logging.warning("Validator netloc is invalid: %s", validator_netloc)
+
+        if normalized not in allowed:
+            raise ValueError("file_owner must reference this node or a registered peer")
+
+        return normalized
+
     def add_transaction(
         self,
         tx_id,
@@ -489,16 +514,8 @@ class Blockchain:
                     return None, False
 
             if file_owner:
-                try:
-                    normalized_owner = normalize_netloc(file_owner)
-                except Exception as exc:
-                    logging.warning(
-                        "Ignoring invalid file_owner %r for transaction %s: %s",
-                        file_owner,
-                        tx_id,
-                        exc,
-                    )
-                else:
+                normalized_owner = self._normalize_and_validate_file_owner(file_owner)
+                if normalized_owner:
                     transaction["file_owner"] = normalized_owner
 
             self.transactions.append(transaction)
@@ -1604,20 +1621,41 @@ def node_upload():
 
     file_owner = matched_owner or configured_self_netlocs[0]
 
-    with blockchain.lock:
-        block_index, added = blockchain.add_transaction(
-            tx_id=tx_id,
-            sender=sender,
-            recipient=recipient,
-            file_name=safe_file_name,
-            file_path=canonical_file_path,
-            alias=alias,
-            recipient_alias=recipient_alias,
-            signature=signature,
-            is_sensitive=is_sensitive,
-            file_owner=file_owner,
-            stored_file_name=pending_filename,
-        )
+    try:
+        with blockchain.lock:
+            block_index, added = blockchain.add_transaction(
+                tx_id=tx_id,
+                sender=sender,
+                recipient=recipient,
+                file_name=safe_file_name,
+                file_path=canonical_file_path,
+                alias=alias,
+                recipient_alias=recipient_alias,
+                signature=signature,
+                is_sensitive=is_sensitive,
+                file_owner=file_owner,
+                stored_file_name=pending_filename,
+            )
+    except ValueError as exc:
+        try:
+            os.remove(pending_abs)
+        except FileNotFoundError:
+            pass
+        except OSError as cleanup_exc:
+            logging.warning(
+                "Failed to remove pending upload for rejected tx %s: %s",
+                tx_id,
+                cleanup_exc,
+            )
+        try:
+            delete_encryption_keys(tx_id)
+        except Exception as cleanup_exc:
+            logging.warning(
+                "Failed to remove encryption metadata for rejected tx %s: %s",
+                tx_id,
+                cleanup_exc,
+            )
+        return jsonify({"error": str(exc)}), 400
 
     if block_index is None:
         try:
@@ -1693,20 +1731,23 @@ def new_transaction():
         except ValueError:
             return "Invalid stored_file_name", 400
 
-    with blockchain.lock:
-        block_index, added = blockchain.add_transaction(
-            tx_id=data["tx_id"],
-            sender=data['sender'],
-            recipient=data['recipient'],
-            file_name=data['file_name'],
-            file_path=data['file_path'],
-            alias=data.get('alias', ''),
-            recipient_alias=data.get('recipient_alias', ''),
-            signature=data['signature'],
-            is_sensitive=data.get('is_sensitive', '0'),
-            file_owner=data.get('file_owner'),
-            stored_file_name=data.get('stored_file_name'),
-        )
+    try:
+        with blockchain.lock:
+            block_index, added = blockchain.add_transaction(
+                tx_id=data["tx_id"],
+                sender=data['sender'],
+                recipient=data['recipient'],
+                file_name=data['file_name'],
+                file_path=data['file_path'],
+                alias=data.get('alias', ''),
+                recipient_alias=data.get('recipient_alias', ''),
+                signature=data['signature'],
+                is_sensitive=data.get('is_sensitive', '0'),
+                file_owner=data.get('file_owner'),
+                stored_file_name=data.get('stored_file_name'),
+            )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     if block_index is None:
         return "Invalid signature", 400
