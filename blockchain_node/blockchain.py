@@ -2126,18 +2126,40 @@ def register_nodes():
     auth_error = _require_node_management_authorization()
     if auth_error:
         return auth_error
-    if request.is_json:
-        val   = request.get_json()
-        node_netlocs = val.get('nodes')
-    else:
-        node_netlocs = request.form.get('nodes','').split(',')
 
-    if not node_netlocs:
-        return "Error: no nodes",400
+    candidates = []
+    payload = request.get_json(silent=True)
+    if payload is not None:
+        candidates.extend(_coerce_node_entries(payload))
+
+    if not candidates and request.form:
+        candidates.extend(_coerce_node_entries(request.form.to_dict(flat=False)))
+
+    if not candidates and request.args:
+        candidates.extend(_coerce_node_entries(request.args.to_dict(flat=False)))
+
+    if not candidates:
+        raw_body = request.get_data(as_text=True).strip()
+        if raw_body:
+            candidates.extend(_coerce_node_entries(raw_body))
+
+    filtered_candidates = [item.strip() for item in candidates if item and item.strip()]
+    if not filtered_candidates:
+        return jsonify({"message": "No nodes provided"}), 400
+
+    normalized_candidates = []
+    for candidate in filtered_candidates:
+        try:
+            normalized_candidates.append(normalize_netloc(candidate))
+        except ValueError as exc:
+            return jsonify({
+                "message": f"Invalid node address: {candidate}",
+                "details": str(exc),
+            }), 400
 
     with blockchain.lock:
-        for netloc in node_netlocs:
-            blockchain.add_node(netloc.strip())
+        for netloc in normalized_candidates:
+            blockchain.add_node(netloc)
         nodes_snapshot = list(blockchain.nodes)
 
     return jsonify({
@@ -2191,12 +2213,22 @@ def register_trusted_nodes():
         if raw_body:
             node_netlocs.extend(_coerce_node_entries(raw_body))
 
-    filtered_netlocs = [item.strip() for item in node_netlocs if item.strip()]
+    filtered_netlocs = [item.strip() for item in node_netlocs if item and item.strip()]
     if not filtered_netlocs:
         return jsonify({"message": "No trusted nodes"}),400
 
+    normalized_netlocs = []
+    for candidate in filtered_netlocs:
+        try:
+            normalized_netlocs.append(normalize_netloc(candidate))
+        except ValueError as exc:
+            return jsonify({
+                "message": f"Invalid trusted node address: {candidate}",
+                "details": str(exc),
+            }), 400
+
     with blockchain.lock:
-        for netloc in filtered_netlocs:
+        for netloc in normalized_netlocs:
             blockchain.add_trusted_node(netloc)
         trusted_snapshot = list(blockchain.trusted_nodes)
 
