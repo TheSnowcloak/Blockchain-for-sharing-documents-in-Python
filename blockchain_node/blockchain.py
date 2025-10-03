@@ -1532,6 +1532,24 @@ def node_upload():
         and enc_tag_b64
     )
 
+    if has_encryption_payload:
+        try:
+            base64.b64decode(enc_key_b64, validate=True)
+            base64.b64decode(enc_nonce_b64, validate=True)
+            base64.b64decode(enc_tag_b64, validate=True)
+        except (binascii.Error, ValueError):
+            try:
+                os.remove(pending_abs)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logging.warning(
+                    "Failed to remove pending upload with invalid encryption payload for tx %s: %s",
+                    tx_id,
+                    exc,
+                )
+            return jsonify({"error": "Invalid encryption payload"}), 400
+
     host_header = request.host or ""
     if not host_header:
         return jsonify({"error": "Missing Host header"}), 400
@@ -1769,9 +1787,12 @@ def decrypt_file(tx_id):
     with open(up_abs, 'rb') as f:
         ciphertext = f.read()
 
-    key_b   = base64.b64decode(enc_info["enc_key_b64"])
-    nonce_b = base64.b64decode(enc_info["enc_nonce_b64"])
-    tag_b   = base64.b64decode(enc_info["enc_tag_b64"])
+    try:
+        key_b = base64.b64decode(enc_info["enc_key_b64"], validate=True)
+        nonce_b = base64.b64decode(enc_info["enc_nonce_b64"], validate=True)
+        tag_b = base64.b64decode(enc_info["enc_tag_b64"], validate=True)
+    except (binascii.Error, ValueError):
+        return jsonify({"error": "Invalid encryption metadata"}), 400
 
     try:
         cipher = AES.new(key_b, AES.MODE_GCM, nonce=nonce_b)
