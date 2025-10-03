@@ -226,34 +226,57 @@ def upload_form():
         data_part['enc_tag_b64']   = enc_tag_b64
 
     files_part = {}
-    with open(local_abs, 'rb') as fh:
-        files_part['file'] = (unique_name, fh)
+    cleanup_error = None
+    request_error = None
+    r = None
 
-        try:
+    try:
+        with open(local_abs, 'rb') as fh:
+            files_part['file'] = (unique_name, fh)
+
             r = requests.post(
                 f"{NODE_URL}/node/upload",
                 files=files_part,
                 data=data_part,
                 timeout=15
             )
-        except requests.exceptions.RequestException as e:
-            app.logger.error(f"Connection error to node: {e}")
-            return jsonify({"error":f"Connection error: {str(e)}"}), 500
-
-    if r.status_code == 201:
-
+    except requests.exceptions.RequestException as exc:
+        request_error = exc
+    finally:
         try:
             os.remove(local_abs)
-        except OSError as e:
-            app.logger.warning(f"Failed remove temp file: {local_abs} => {e}")
+        except OSError as exc:
+            cleanup_error = exc
 
+    if request_error is not None:
+        log_msg = f"Connection error to node: {request_error}"
+        if cleanup_error is not None:
+            log_msg += f" (cleanup failed: {cleanup_error})"
+        app.logger.error(log_msg)
+        return jsonify({"error": f"Connection error: {str(request_error)}"}), 500
+
+    if r is None:
+        # Should not occur, but guard against unexpected situations.
+        error_message = "Upload failed before receiving a response"
+        if cleanup_error is not None:
+            error_message += f" (cleanup failed: {cleanup_error})"
+        app.logger.error(error_message)
+        return jsonify({"error": error_message}), 500
+
+    if r.status_code == 201:
+        if cleanup_error is not None:
+            app.logger.warning(f"Failed remove temp file: {local_abs} => {cleanup_error}")
         return jsonify(r.json()), 201
-    else:
-        # Node returned an error
-        return jsonify({
-            "error": f"Node error {r.status_code}",
-            "detail": r.text
-        }), r.status_code
+
+    error_log = f"Node error {r.status_code}: {r.text}"
+    if cleanup_error is not None:
+        error_log += f" (cleanup failed: {cleanup_error})"
+    app.logger.error(error_log)
+
+    return jsonify({
+        "error": f"Node error {r.status_code}",
+        "detail": r.text
+    }), r.status_code
  # Start the client on port 8081 (change as needed)
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8081)
