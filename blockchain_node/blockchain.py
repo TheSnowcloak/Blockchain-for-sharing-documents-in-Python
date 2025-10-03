@@ -360,16 +360,19 @@ class Blockchain:
     def lock(self):
         return self._lock
 
+    def _find_transaction_location_unlocked(self, tx_id):
+        for transaction in self.transactions:
+            if transaction.get("tx_id") == tx_id:
+                return "pending"
+        for block in self.chain:
+            for transaction in block.get("transactions", []):
+                if transaction.get("tx_id") == tx_id:
+                    return block.get("index")
+        return None
+
     def transaction_exists(self, tx_id):
         with self._lock:
-            for transaction in self.transactions:
-                if transaction.get("tx_id") == tx_id:
-                    return True
-            for block in self.chain:
-                for transaction in block.get("transactions", []):
-                    if transaction.get("tx_id") == tx_id:
-                        return True
-        return False
+            return self._find_transaction_location_unlocked(tx_id) is not None
 
     def get_transaction_by_id(self, tx_id):
         with self._lock:
@@ -489,9 +492,10 @@ class Blockchain:
         allow_system_transaction=False,
     ):
         with self._lock:
-            if self.transaction_exists(tx_id):
+            existing_location = self._find_transaction_location_unlocked(tx_id)
+            if existing_location is not None:
                 logging.info(f"Transaction {tx_id} already known. Duplicate ignored.")
-                return self.last_block["index"], False
+                return existing_location, False, False
 
             transaction = OrderedDict({
                 "tx_id": tx_id,
@@ -516,25 +520,31 @@ class Blockchain:
                 signable = self._build_signable_transaction(transaction)
                 if not self.verify_signature(sender, signature, signable):
                     logging.error("Signature invalid!")
-                    return None, False
+                    return None, False, False
 
             if file_owner:
                 normalized_owner = self._normalize_and_validate_file_owner(file_owner)
                 if normalized_owner:
                     transaction["file_owner"] = normalized_owner
 
+            predicted_index = self.last_block["index"] + 1
             self.transactions.append(transaction)
 
+            mined_block = None
             if len(self.transactions) >= 5:
                 logging.info("Reached 5 pending TX. Auto-mining new block.")
                 last_block = self.last_block
                 prev_hash = self.hash(last_block)
                 try:
-                    self.create_block(proof=100, previous_hash=prev_hash)
+                    mined_block = self.create_block(proof=100, previous_hash=prev_hash)
                 except PermissionError as exc:
                     logging.error(f"Auto-mining skipped: {exc}")
+                    mined_block = None
 
-            return self.last_block["index"], True
+            if mined_block:
+                return mined_block.get("index"), True, True
+
+            return predicted_index, True, False
 
     def verify_signature(self, sender_pub_hex, signature_hex, transaction):
         try:
@@ -1825,7 +1835,7 @@ def node_upload():
 
     try:
         with blockchain.lock:
-            block_index, added = blockchain.add_transaction(
+            location, added, mined = blockchain.add_transaction(
                 tx_id=tx_id,
                 sender=sender,
                 recipient=recipient,
@@ -1859,7 +1869,7 @@ def node_upload():
             )
         return jsonify({"error": str(exc)}), 400
 
-    if block_index is None:
+    if location is None:
         try:
             os.remove(pending_abs)
         except FileNotFoundError:
@@ -1891,12 +1901,30 @@ def node_upload():
                 tx_id,
                 exc,
             )
-        return jsonify({"message": f"File already received, block = {block_index}"}), 200
+        if location == "pending":
+            message = "File already received and pending confirmation"
+        else:
+            message = f"File already received, block = {location}"
+        return jsonify({
+            "message": message,
+            "location": location,
+            "added": False,
+            "mined": False,
+        }), 200
 
     if has_encryption_payload and added:
         store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
 
-    return jsonify({"message": f"File received, block = {block_index}"}), 201
+    if mined:
+        message = f"File received and stored in block {location}"
+    else:
+        message = f"File received, pending block {location}"
+    return jsonify({
+        "message": message,
+        "location": location,
+        "added": True,
+        "mined": mined,
+    }), 201
 
 
 @app.route('/transactions/new', methods=['POST'])
@@ -1938,7 +1966,7 @@ def new_transaction():
 
     try:
         with blockchain.lock:
-            block_index, added = blockchain.add_transaction(
+            location, added, mined = blockchain.add_transaction(
                 tx_id=data["tx_id"],
                 sender=data['sender'],
                 recipient=data['recipient'],
@@ -1954,20 +1982,38 @@ def new_transaction():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    if block_index is None:
+    if location is None:
         return "Invalid signature", 400
 
     stored_tx = blockchain.get_transaction_by_id(data["tx_id"])
     if stored_tx and stored_tx.get("file_owner"):
         data['file_owner'] = stored_tx['file_owner']
 
-    if added and block_index and not skip_broadcast:
+    if added and location and location != "pending" and not skip_broadcast:
         blockchain.broadcast_new_transaction(data)
 
     if added:
-        return jsonify({"message": f"Transaction will be added to block {block_index}"}), 201
+        if mined:
+            message = f"Transaction added to block {location}"
+        else:
+            message = f"Transaction will be added to block {location}"
+        return jsonify({
+            "message": message,
+            "location": location,
+            "added": True,
+            "mined": mined,
+        }), 201
 
-    return jsonify({"message": f"Transaction already accepted in block {block_index}"}), 200
+    if location == "pending":
+        message = "Transaction already pending confirmation"
+    else:
+        message = f"Transaction already accepted in block {location}"
+    return jsonify({
+        "message": message,
+        "location": location,
+        "added": False,
+        "mined": False,
+    }), 200
 
 @app.route('/transactions/get', methods=['GET'])
 def get_transactions():
