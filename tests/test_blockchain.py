@@ -56,6 +56,8 @@ def _sign_transaction(module, private_key_hex, data):
         'sender': data['sender'],
         'recipient': data['recipient'],
         'file_name': data['file_name'],
+        'stored_file_name': data.get('stored_file_name')
+        or _canonical_name(module, data['tx_id'], data['file_name']),
         'alias': data.get('alias', ''),
         'recipient_alias': data.get('recipient_alias', ''),
         'is_sensitive': data.get('is_sensitive', '0'),
@@ -72,6 +74,10 @@ def _generate_rsa_keypair():
     private_hex = binascii.hexlify(key.export_key(format='DER')).decode('ascii')
     public_hex = binascii.hexlify(key.publickey().export_key(format='DER')).decode('ascii')
     return private_hex, public_hex
+
+
+def _canonical_name(module, tx_id, file_name):
+    return module._derive_canonical_stored_name(tx_id, file_name)
 
 
 def test_create_block_normalizes_missing_file(isolated_blockchain):
@@ -96,9 +102,10 @@ def test_create_block_normalizes_missing_file(isolated_blockchain):
     assert block["transactions"], "Transaction should be recorded in the new block"
 
     tx = block["transactions"][0]
-    assert tx["file_path"] == "./uploads/doc.txt"
+    expected_stored = _canonical_name(module, tx_id, "doc.txt")
+    assert tx["file_path"] == os.path.join(module.UPLOAD_FOLDER, expected_stored)
     assert tx["file_owner"] == "127.0.0.1:5000"
-    assert tx["stored_file_name"] == "doc.txt"
+    assert tx["stored_file_name"] == expected_stored
 
 
 def test_pending_transactions_persist_after_reload(isolated_blockchain):
@@ -421,7 +428,7 @@ def test_resolve_conflicts_removes_pending_files(isolated_blockchain, monkeypatc
     }
     bc.chain = [genesis_block]
 
-    stored_basename = "pending_doc.txt"
+    stored_basename = _canonical_name(module, "tx-pending", "doc.txt")
     pending_rel = os.path.join(module.PENDING_FOLDER, stored_basename)
     pending_path = Path(pending_rel)
     pending_path.write_bytes(b"pending-bytes")
@@ -486,20 +493,21 @@ def test_resolve_conflicts_removes_late_pending_upload(isolated_blockchain, monk
     bc, module = isolated_blockchain
 
     pending_name = "late_pending.txt"
-    pending_path = Path(module.PENDING_FOLDER) / pending_name
+    tx_id = "tx-late"
+    expected_name = _canonical_name(module, tx_id, pending_name)
+    pending_path = Path(module.PENDING_FOLDER) / expected_name
     pending_path.write_text("pending-bytes")
 
-    tx_id = "tx-late"
     pending_tx = {
         "tx_id": tx_id,
         "sender": "sender",
         "recipient": "recipient",
         "file_name": pending_name,
-        "file_path": f"./pending_uploads/{pending_name}",
+        "file_path": os.path.join(module.PENDING_FOLDER, expected_name),
         "alias": "",
         "recipient_alias": "",
         "is_sensitive": "0",
-        "stored_file_name": pending_name,
+        "stored_file_name": expected_name,
     }
 
     bc.nodes = {"peer-a:5000"}
@@ -625,7 +633,7 @@ def test_file_route_and_sync_use_stored_filename(isolated_blockchain, monkeypatc
     bc, module = isolated_blockchain
 
     file_bytes = b"stored-file"
-    stored_basename = "stored_report.txt"
+    stored_basename = _canonical_name(module, "tx-stored", "report.txt")
     pending_rel = os.path.join(module.PENDING_FOLDER, stored_basename)
     os.makedirs(os.path.dirname(pending_rel), exist_ok=True)
     with open(pending_rel, "wb") as handle:

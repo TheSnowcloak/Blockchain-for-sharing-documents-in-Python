@@ -75,11 +75,20 @@ class UploadSecurityTestCase(unittest.TestCase):
                 fh.write(self._keys_db_backup)
 
     def _signature_for(self, data):
+        stored_name = data.get('stored_file_name')
+        if not stored_name:
+            try:
+                stored_name = node_module._derive_canonical_stored_name(
+                    data['tx_id'], data['file_name']
+                )
+            except ValueError:
+                stored_name = ''
         payload = {
             'tx_id': data['tx_id'],
             'sender': data['sender'],
             'recipient': data['recipient'],
             'file_name': data['file_name'],
+            'stored_file_name': stored_name,
             'alias': data.get('alias', ''),
             'recipient_alias': data.get('recipient_alias', ''),
             'is_sensitive': data.get('is_sensitive', '0'),
@@ -90,6 +99,13 @@ class UploadSecurityTestCase(unittest.TestCase):
         return binascii.hexlify(signature).decode('ascii')
 
     def _attach_signature(self, data):
+        if 'stored_file_name' not in data or not data['stored_file_name']:
+            try:
+                data['stored_file_name'] = node_module._derive_canonical_stored_name(
+                    data['tx_id'], data['file_name']
+                )
+            except ValueError:
+                data['stored_file_name'] = ''
         data['signature'] = self._signature_for(data)
         return data
 
@@ -272,7 +288,7 @@ class UploadSecurityTestCase(unittest.TestCase):
             self.assertEqual(response_first.status_code, 201, response_first.data)
 
             pending_files_after_first = set(os.listdir(node_module.PENDING_FOLDER))
-            expected_pending_name = f"{first_uuid_hex}_{file_name}"
+            expected_pending_name = node_module._derive_canonical_stored_name(tx_id, file_name)
             self.assertIn(expected_pending_name, pending_files_after_first)
             first_pending_path = os.path.abspath(
                 os.path.join(node_module.PENDING_FOLDER, expected_pending_name)
@@ -469,13 +485,14 @@ class UploadSecurityTestCase(unittest.TestCase):
         node_module.blockchain.nodes = {'peer-a:5000'}
         node_module.blockchain.trusted_nodes = set()
 
+        expected_stored = node_module._derive_canonical_stored_name(tx_id, 'document.txt')
         remote_tx = {
             'tx_id': tx_id,
             'sender': node_module.MINING_SENDER,
             'recipient': 'recipient',
             'file_name': 'document.txt',
-            'file_path': './uploads/nonexistent.txt',
-            'stored_file_name': 'document.txt',
+            'file_path': os.path.join(node_module.UPLOAD_FOLDER, expected_stored),
+            'stored_file_name': expected_stored,
             'signature': '',
             'file_owner': invalid_owner,
             'is_sensitive': '0',
@@ -533,6 +550,34 @@ class UploadSecurityTestCase(unittest.TestCase):
         stored_tx = node_module.blockchain.get_transaction_by_id(accepted_payload['tx_id'])
         self.assertIsNotNone(stored_tx)
         self.assertEqual(stored_tx.get('file_owner'), 'ally.example:5000')
+
+    def test_transactions_new_normalizes_tampered_stored_filename(self):
+        tx_id = uuid.uuid4().hex
+        payload = {
+            'tx_id': tx_id,
+            'sender': self.sender_public_hex,
+            'recipient': 'recipient',
+            'file_name': 'document.txt',
+            'file_path': os.path.join(node_module.PENDING_FOLDER, 'placeholder.txt'),
+        }
+        payload = self._attach_signature(payload)
+
+        payload['stored_file_name'] = 'tampered.txt'
+        payload['file_path'] = os.path.join(node_module.PENDING_FOLDER, 'tampered.txt')
+
+        response = self.client.post('/transactions/new', json=payload)
+        self.assertEqual(response.status_code, 201, response.data)
+        body = response.get_json()
+        self.assertTrue(body.get('added'))
+
+        stored_tx = node_module.blockchain.get_transaction_by_id(tx_id)
+        self.assertIsNotNone(stored_tx)
+        expected_stored = node_module._derive_canonical_stored_name(tx_id, 'document.txt')
+        self.assertEqual(stored_tx.get('stored_file_name'), expected_stored)
+        self.assertEqual(
+            stored_tx.get('file_path'),
+            os.path.join(node_module.PENDING_FOLDER, expected_stored),
+        )
 
     def test_malformed_encryption_payload_rejected_and_decrypt_succeeds_for_valid_upload(self):
         malformed_tx_id = uuid.uuid4().hex

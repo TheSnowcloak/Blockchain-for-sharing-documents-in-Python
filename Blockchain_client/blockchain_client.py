@@ -31,6 +31,19 @@ from werkzeug.utils import secure_filename
 
 from uuid import uuid4
 
+
+def derive_canonical_stored_name(tx_id: str, file_name: str) -> str:
+    safe_name = secure_filename(file_name)
+    if not safe_name:
+        raise ValueError("Invalid file name")
+    _, ext = os.path.splitext(safe_name)
+    ext = ext.lower()
+    canonical = f"{tx_id}{ext}" if ext else tx_id
+    canonical_safe = secure_filename(canonical)
+    if not canonical_safe:
+        raise ValueError("Invalid canonical stored filename")
+    return canonical_safe
+
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 logging.basicConfig(level=logging.DEBUG)
 
@@ -194,12 +207,14 @@ def upload_form():
     ralias = request.form.get('recipient_alias','')
 
     tx_id  = str(uuid4().hex)
+    canonical_stored_name = derive_canonical_stored_name(tx_id, unique_name)
 
     partial_tx = {
         "tx_id":           tx_id,
         "sender":          spub,
         "recipient":       rpub,
         "file_name":       unique_name,
+        "stored_file_name": canonical_stored_name,
         "alias":           alias,
         "recipient_alias": ralias,
         "is_sensitive":    "1" if is_sensitive else "0"
@@ -216,7 +231,8 @@ def upload_form():
         'recipient_alias':  ralias,
         'is_sensitive':     "1" if is_sensitive else "0",
 
-        'file_name':        unique_name
+        'file_name':        unique_name,
+        'stored_file_name': canonical_stored_name,
     }
 
     # If the file is sensitive, attach encryption keys to the request

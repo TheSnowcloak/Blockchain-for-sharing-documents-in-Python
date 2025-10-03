@@ -71,6 +71,19 @@ def _ensure_safe_filename(name: str) -> str:
         raise ValueError("Invalid filename")
     return safe_name
 
+
+def _derive_canonical_stored_name(tx_id: str, file_name: str) -> str:
+    """Return the canonical stored filename for a transaction."""
+
+    if not tx_id:
+        raise ValueError("tx_id is required")
+
+    safe_file_name = _ensure_safe_filename(file_name)
+    _, ext = os.path.splitext(safe_file_name)
+    ext = ext.lower()
+    canonical = f"{tx_id}{ext}" if ext else tx_id
+    return _ensure_safe_filename(canonical)
+
 def _is_safe_subpath(path_value: str, base_directory: str) -> bool:
     if not path_value:
         return False
@@ -445,6 +458,7 @@ class Blockchain:
             "sender",
             "recipient",
             "file_name",
+            "stored_file_name",
             "alias",
             "recipient_alias",
             "is_sensitive",
@@ -497,21 +511,50 @@ class Blockchain:
                 logging.info(f"Transaction {tx_id} already known. Duplicate ignored.")
                 return existing_location, False, False
 
+            try:
+                safe_file_name = _ensure_safe_filename(file_name)
+            except ValueError as exc:
+                raise ValueError("Invalid file_name supplied") from exc
+
+            canonical_stored_name = _derive_canonical_stored_name(tx_id, safe_file_name)
+
             transaction = OrderedDict({
                 "tx_id": tx_id,
                 "sender": sender,
                 "recipient": recipient,
-                "file_name": file_name,
+                "file_name": safe_file_name,
                 "file_path": file_path,
                 "alias": alias,
                 "recipient_alias": recipient_alias,
                 "is_sensitive": is_sensitive,
             })
 
-            if not stored_file_name and file_path:
-                stored_file_name = os.path.basename(os.path.normpath(file_path))
             if stored_file_name:
-                transaction["stored_file_name"] = stored_file_name
+                try:
+                    provided_stored = _ensure_safe_filename(stored_file_name)
+                except ValueError as exc:
+                    raise ValueError("Invalid stored_file_name supplied") from exc
+            else:
+                provided_stored = canonical_stored_name
+
+            if provided_stored != canonical_stored_name:
+                logging.warning(
+                    "Stored filename mismatch for tx %s; expected %s, received %s. Using canonical value.",
+                    tx_id,
+                    canonical_stored_name,
+                    provided_stored,
+                )
+
+            transaction["stored_file_name"] = canonical_stored_name
+
+            if file_path:
+                if _is_safe_subpath(file_path, PENDING_FOLDER):
+                    canonical_path = os.path.join(PENDING_FOLDER, canonical_stored_name)
+                elif _is_safe_subpath(file_path, UPLOAD_FOLDER):
+                    canonical_path = os.path.join(UPLOAD_FOLDER, canonical_stored_name)
+                else:
+                    raise ValueError("Invalid file_path supplied")
+                transaction["file_path"] = canonical_path
 
             if sender == MINING_SENDER and not allow_system_transaction:
                 raise ValueError("Transactions using the mining sender must be created internally")
@@ -1745,6 +1788,9 @@ def node_upload():
     if sender == MINING_SENDER:
         return jsonify({"error": "Reserved sender identifier is not permitted"}), 400
 
+    if not tx_id:
+        return jsonify({"error": "Missing tx_id in form data"}), 400
+
     file_name = request.form.get('file_name', '')
     if not file_name:
         return jsonify({"error": "Missing file_name in form data"}), 400
@@ -1754,11 +1800,16 @@ def node_upload():
     except ValueError:
         return jsonify({"error": "Invalid file_name supplied"}), 400
 
+    try:
+        canonical_stored_name = _derive_canonical_stored_name(tx_id, safe_file_name)
+    except ValueError:
+        return jsonify({"error": "Invalid transaction identifiers supplied"}), 400
+
     provided_path = request.form.get('file_path', '')
     if provided_path and not _is_safe_subpath(provided_path, PENDING_FOLDER):
         return jsonify({"error": "Invalid file_path supplied"}), 400
 
-    pending_filename = f"{uuid4().hex}_{safe_file_name}"
+    pending_filename = canonical_stored_name
     canonical_file_path = os.path.join(PENDING_FOLDER, pending_filename)
     pending_abs = os.path.abspath(canonical_file_path)
     pending_root = os.path.abspath(PENDING_FOLDER)
@@ -1766,7 +1817,10 @@ def node_upload():
         return jsonify({"error": "Failed to derive safe pending path"}), 400
 
     os.makedirs(os.path.dirname(pending_abs), exist_ok=True)
-    upfile.save(pending_abs)
+    saved_new_file = False
+    if not os.path.exists(pending_abs):
+        upfile.save(pending_abs)
+        saved_new_file = True
 
     enc_key_b64 = request.form.get('enc_key_b64', '')
     enc_nonce_b64 = request.form.get('enc_nonce_b64', '')
@@ -1784,16 +1838,17 @@ def node_upload():
             base64.b64decode(enc_nonce_b64, validate=True)
             base64.b64decode(enc_tag_b64, validate=True)
         except (binascii.Error, ValueError):
-            try:
-                os.remove(pending_abs)
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                logging.warning(
-                    "Failed to remove pending upload with invalid encryption payload for tx %s: %s",
-                    tx_id,
-                    exc,
-                )
+            if saved_new_file:
+                try:
+                    os.remove(pending_abs)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    logging.warning(
+                        "Failed to remove pending upload with invalid encryption payload for tx %s: %s",
+                        tx_id,
+                        exc,
+                    )
             return jsonify({"error": "Invalid encryption payload"}), 400
 
     host_header = request.host or ""
@@ -1866,16 +1921,17 @@ def node_upload():
                 stored_file_name=pending_filename,
             )
     except ValueError as exc:
-        try:
-            os.remove(pending_abs)
-        except FileNotFoundError:
-            pass
-        except OSError as cleanup_exc:
-            logging.warning(
-                "Failed to remove pending upload for rejected tx %s: %s",
-                tx_id,
-                cleanup_exc,
-            )
+        if saved_new_file:
+            try:
+                os.remove(pending_abs)
+            except FileNotFoundError:
+                pass
+            except OSError as cleanup_exc:
+                logging.warning(
+                    "Failed to remove pending upload for rejected tx %s: %s",
+                    tx_id,
+                    cleanup_exc,
+                )
         try:
             delete_encryption_keys(tx_id)
         except Exception as cleanup_exc:
@@ -1887,16 +1943,17 @@ def node_upload():
         return jsonify({"error": str(exc)}), 400
 
     if location is None:
-        try:
-            os.remove(pending_abs)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            logging.warning(
-                "Failed to remove pending upload for rejected tx %s: %s",
-                tx_id,
-                exc,
-            )
+        if saved_new_file:
+            try:
+                os.remove(pending_abs)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logging.warning(
+                    "Failed to remove pending upload for rejected tx %s: %s",
+                    tx_id,
+                    exc,
+                )
         try:
             delete_encryption_keys(tx_id)
         except Exception as exc:
@@ -1908,16 +1965,17 @@ def node_upload():
         return jsonify({"error": "Invalid signature"}), 400
 
     if not added:
-        try:
-            os.remove(pending_abs)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            logging.warning(
-                "Failed to remove duplicate pending upload for tx %s: %s",
-                tx_id,
-                exc,
-            )
+        if saved_new_file:
+            try:
+                os.remove(pending_abs)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logging.warning(
+                    "Failed to remove duplicate pending upload for tx %s: %s",
+                    tx_id,
+                    exc,
+                )
         if location == "pending":
             message = "File already received and pending confirmation"
         else:
@@ -1964,22 +2022,37 @@ def new_transaction():
     except ValueError:
         return "Invalid file_name", 400
 
+    try:
+        canonical_stored_name = _derive_canonical_stored_name(data["tx_id"], data["file_name"])
+    except ValueError:
+        return "Invalid stored_file_name", 400
+
     file_path_value = data["file_path"]
-    if not (_is_safe_subpath(file_path_value, PENDING_FOLDER) or _is_safe_subpath(file_path_value, UPLOAD_FOLDER)):
+    if _is_safe_subpath(file_path_value, PENDING_FOLDER):
+        data["file_path"] = os.path.join(PENDING_FOLDER, canonical_stored_name)
+    elif _is_safe_subpath(file_path_value, UPLOAD_FOLDER):
+        data["file_path"] = os.path.join(UPLOAD_FOLDER, canonical_stored_name)
+    else:
         return "Invalid file_path", 400
 
     stored_name = data.get("stored_file_name")
     if stored_name:
         try:
-            data["stored_file_name"] = _ensure_safe_filename(stored_name)
+            safe_stored = _ensure_safe_filename(stored_name)
         except ValueError:
             return "Invalid stored_file_name", 400
     else:
-        derived_name = os.path.basename(os.path.normpath(file_path_value))
-        try:
-            data["stored_file_name"] = _ensure_safe_filename(derived_name)
-        except ValueError:
-            return "Invalid stored_file_name", 400
+        safe_stored = canonical_stored_name
+
+    if safe_stored != canonical_stored_name:
+        logging.warning(
+            "Stored filename mismatch for tx %s during /transactions/new; expected %s, received %s.",
+            data["tx_id"],
+            canonical_stored_name,
+            safe_stored,
+        )
+
+    data["stored_file_name"] = canonical_stored_name
 
     try:
         with blockchain.lock:
