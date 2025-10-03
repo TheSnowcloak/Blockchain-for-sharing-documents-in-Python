@@ -1309,10 +1309,26 @@ class Blockchain:
         try:
             ip_obj = ipaddress.ip_address(stripped_host)
         except ValueError:
+            ip_list = []
             try:
-                _name, _alias, ip_list = socket.gethostbyname_ex(stripped_host)
+                addrinfo_list = socket.getaddrinfo(
+                    stripped_host,
+                    None,
+                    family=socket.AF_UNSPEC,
+                    type=0,
+                )
             except (socket.gaierror, UnicodeError):
-                ip_list = []
+                addrinfo_list = []
+
+            for family, _socktype, _proto, _canonname, sockaddr in addrinfo_list:
+                if not sockaddr:
+                    continue
+                raw_ip = sockaddr[0]
+                try:
+                    normalized_ip = ipaddress.ip_address(raw_ip)
+                except ValueError:
+                    continue
+                ip_list.append(str(normalized_ip))
         else:
             ip_list = [str(ip_obj)]
 
