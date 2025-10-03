@@ -1591,6 +1591,12 @@ def _trusted_management_forbidden_response():
 def _node_management_forbidden_response():
     return jsonify({"message": _NODE_MANAGEMENT_FORBIDDEN_MESSAGE}), 403
 
+
+def _require_node_management_authorization():
+    if _request_from_trusted() or _request_from_localhost():
+        return None
+    return _node_management_forbidden_response()
+
 @app.route('/')
 def node_index():
     """
@@ -2117,8 +2123,9 @@ def decrypt_file(tx_id):
 
 @app.route('/nodes/register', methods=['POST'])
 def register_nodes():
-    if not (_request_from_trusted() or _request_from_localhost()):
-        return _node_management_forbidden_response()
+    auth_error = _require_node_management_authorization()
+    if auth_error:
+        return auth_error
     if request.is_json:
         val   = request.get_json()
         node_netlocs = val.get('nodes')
@@ -2140,8 +2147,9 @@ def register_nodes():
 
 @app.route('/nodes/remove', methods=['POST'])
 def remove_node():
-    if not (_request_from_trusted() or _request_from_localhost()):
-        return _node_management_forbidden_response()
+    auth_error = _require_node_management_authorization()
+    if auth_error:
+        return auth_error
     d = request.get_json() or {}
     if 'node' not in d:
         return jsonify({"message":"Missing node address"}),400
@@ -2155,8 +2163,9 @@ def remove_node():
 
 @app.route('/nodes/get', methods=['GET'])
 def get_nodes():
-    if not (_request_from_trusted() or _request_from_localhost()):
-        return _node_management_forbidden_response()
+    auth_error = _require_node_management_authorization()
+    if auth_error:
+        return auth_error
     with blockchain.lock:
         nodes_snapshot = list(blockchain.nodes)
     return jsonify({"total_nodes": nodes_snapshot}),200
@@ -2221,6 +2230,9 @@ def get_trusted_nodes():
 
 @app.route('/nodes/resolve', methods=['GET'])
 def consensus():
+    auth_error = _require_node_management_authorization()
+    if auth_error:
+        return auth_error
     replaced = blockchain.resolve_conflicts()
     if replaced:
         return jsonify({"message":"Chain replaced"}),200
@@ -2228,6 +2240,9 @@ def consensus():
 
 @app.route('/sync', methods=['GET'])
 def manual_sync():
+    auth_error = _require_node_management_authorization()
+    if auth_error:
+        return auth_error
     blockchain.sync_files()
     return jsonify({"message":"sync done"}),200
 
