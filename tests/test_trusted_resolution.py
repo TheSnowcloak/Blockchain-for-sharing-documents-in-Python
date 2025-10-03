@@ -43,13 +43,21 @@ def test_hostname_resolution_allows_trusted_access(isolated_app, monkeypatch):
     resolved_ip = "203.0.113.7"
     lookup_calls = []
 
-    def fake_gethostbyname_ex(host):
-        lookup_calls.append(host)
+    def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        lookup_calls.append((host, port, family, type, proto, flags))
         if host != "trusted.example.com":
             raise AssertionError(f"Unexpected lookup for host {host}")
-        return host, [], [resolved_ip]
+        return [
+            (
+                module.socket.AF_INET,
+                module.socket.SOCK_STREAM,
+                6,
+                "",
+                (resolved_ip, 0),
+            )
+        ]
 
-    monkeypatch.setattr(module.socket, "gethostbyname_ex", fake_gethostbyname_ex)
+    monkeypatch.setattr(module.socket, "getaddrinfo", fake_getaddrinfo)
 
     client = module.app.test_client()
 
@@ -67,7 +75,50 @@ def test_hostname_resolution_allows_trusted_access(isolated_app, monkeypatch):
         environ_base={"REMOTE_ADDR": resolved_ip},
     )
     assert second.status_code == 200
-    assert lookup_calls == ["trusted.example.com"], "DNS lookup should be cached after first resolution"
+    assert lookup_calls == [
+        ("trusted.example.com", None, module.socket.AF_UNSPEC, 0, 0, 0)
+    ], "DNS lookup should be cached after first resolution"
+
+
+def test_hostname_with_ipv6_only_resolution(isolated_app, monkeypatch):
+    module = isolated_app
+    blockchain = module.blockchain
+
+    trusted_netloc = "ipv6-only.example.com:5000"
+    blockchain.add_trusted_node(trusted_netloc)
+
+    ipv6_address = "2001:db8::1234"
+    lookup_calls = []
+
+    def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        lookup_calls.append((host, port, family, type, proto, flags))
+        if host != "ipv6-only.example.com":
+            raise AssertionError(f"Unexpected lookup for host {host}")
+        return [
+            (
+                module.socket.AF_INET6,
+                module.socket.SOCK_STREAM,
+                6,
+                "",
+                (ipv6_address, 0, 0, 0),
+            )
+        ]
+
+    monkeypatch.setattr(module.socket, "getaddrinfo", fake_getaddrinfo)
+
+    client = module.app.test_client()
+
+    response = client.get(
+        "/trusted_nodes/keys",
+        environ_base={"REMOTE_ADDR": ipv6_address},
+    )
+    assert response.status_code == 200
+
+    cached_ips = blockchain.get_trusted_netloc_ips(trusted_netloc)
+    assert ipv6_address in cached_ips
+    assert lookup_calls == [
+        ("ipv6-only.example.com", None, module.socket.AF_UNSPEC, 0, 0, 0)
+    ], "DNS lookup should be cached after first resolution"
 
 
 def test_ipv6_bracketed_trusted_registration(isolated_app):
