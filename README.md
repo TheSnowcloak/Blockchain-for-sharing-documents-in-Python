@@ -39,23 +39,40 @@ The project demonstrates:
    pip install flask requests pycryptodome flask-cors
    ```
 
-3. **Start the node (server)** – Navigate to the node directory and run the Flask app:
+3. **Configure the node address** – Before the node can accept uploads it must know which hostnames (or host:port combinations) represent itself. Choose **one** of the following approaches *before* you start the server:
+   - **Environment variable** – Set `LOCAL_NODE_NETLOCS` to a comma-separated list of allowed addresses. Example for Linux/macOS:
+     ```sh
+     export LOCAL_NODE_NETLOCS="127.0.0.1:5000, localhost:5000"
+     ```
+     On Windows (PowerShell):
+     ```powershell
+     setx LOCAL_NODE_NETLOCS "127.0.0.1:5000,localhost:5000"
+     ```
+     Restart the terminal so the variable is available before running `python blockchain.py`.
+   - **Web interface** – After starting the node, open `http://localhost:5000/configure` and submit the **Validator Netlocs** form. This updates the same whitelist without touching environment variables.
+
+4. **Start the node (server)** – Navigate to the node directory and run the Flask app:
    ```sh
    cd blockchain_node
    python blockchain.py
    ```
-   By default the node listens on `http://0.0.0.0:5000`. Visit `http://localhost:5000` in a browser to access the dashboard.
+   By default the node listens on `http://0.0.0.0:5000`. Visit `http://localhost:5000` in a browser to access the dashboard and confirm that the “Local node netlocs” list contains the addresses you configured. If you see the error `LOCAL_NODE_NETLOCS must be configured`, return to step 3 and add the hostname you are using in the client.
 
-4. **Start the client** – Launch the client from its directory:
+5. **Start the client** – Launch the client from its directory:
    ```sh
    cd Blockchain_client
    python blockchain_client.py
    ```
    The client listens on `http://0.0.0.0:8081`; open `http://localhost:8081` in your browser to generate keys, upload files, or browse transactions.
 
-5. **Adjust node addresses in the client** – In `Blockchain_client/blockchain_client.py` update the `NODE_URL` constant to match the node’s address (for example `http://192.168.1.10:5000`). Also update `const nodeUrl = "http://127.0.0.1:5000/";` inside `Blockchain_client/templates/view_transactions.html` so the JavaScript code targets the correct node.
+6. **Adjust node addresses in the client** – In `Blockchain_client/blockchain_client.py` update the `NODE_URL` constant to match the node’s address (for example `http://192.168.1.10:5000`). Also update `const nodeUrl = "http://127.0.0.1:5000/";` inside `Blockchain_client/templates/view_transactions.html` so the JavaScript code targets the correct node.
 
-6. **Open encrypted files** – To download a decrypted version of a sensitive file, request the `/decrypt/<TX_ID>` endpoint (using a browser, Postman, or curl). The node responds with a `Content-Disposition: attachment` header and the decrypted file name (`decrypted_<OriginalName>`), which your browser will offer to save.
+7. **Upload a file** – On the “Upload a file and sign a transaction” page, fill in the sender/receiver details, choose a file, and click **Send and sign**. If the client reports `LOCAL_NODE_NETLOCS must be configured`, double-check that:
+   - The node was started with the correct whitelist (see step 3).
+   - The URL shown in the client matches one of the allowed entries (including the port).
+   - The node was restarted after changing environment variables.
+
+8. **Open encrypted files** – To download a decrypted version of a sensitive file, request the `/decrypt/<TX_ID>` endpoint (using a browser, Postman, or curl). The node responds with a `Content-Disposition: attachment` header and the decrypted file name (`decrypted_<OriginalName>`), which your browser will offer to save.
 
 ### Node Management
 After at least one node is running (see **Start the node** above), use the following endpoints to manage a cluster. Each example shows both Linux/macOS syntax (`curl`) and Windows syntax (`curl.exe` in Command Prompt or PowerShell). Windows 10+ bundles `curl.exe`; for older versions install curl from [curl.se](https://curl.se/windows/) or use PowerShell’s `Invoke-RestMethod` as an alternative.
@@ -257,23 +274,40 @@ Projekt demonstruje:
    pip install flask requests pycryptodome flask-cors
    ```
 
-3. **Spuštění uzlu (serveru)** – Přejděte do adresáře uzlu a spusťte Flask aplikaci:
+3. **Konfigurace adresy uzlu** – Než může uzel přijímat nahrávky, musí znát hostitelská jména (nebo dvojice host:port), která jej reprezentují. Vyberte si **jednu** z následujících možností *před* spuštěním serveru:
+   - **Proměnná prostředí** – Nastavte `LOCAL_NODE_NETLOCS` na seznam adres oddělených čárkou. Příklad pro Linux/macOS:
+     ```sh
+     export LOCAL_NODE_NETLOCS="127.0.0.1:5000, localhost:5000"
+     ```
+     Ve Windows (PowerShell):
+     ```powershell
+     setx LOCAL_NODE_NETLOCS "127.0.0.1:5000,localhost:5000"
+     ```
+     Po nastavení restartujte terminál, aby byla proměnná dostupná před spuštěním `python blockchain.py`.
+   - **Webové rozhraní** – Po spuštění uzlu otevřete `http://localhost:5000/configure` a odešlete formulář **Validator Netlocs**. Tím aktualizujete stejný seznam bez zásahu do proměnných prostředí.
+
+4. **Spuštění uzlu (serveru)** – Přejděte do adresáře uzlu a spusťte Flask aplikaci:
    ```sh
    cd blockchain_node
    python blockchain.py
    ```
-   Ve výchozím nastavení uzel naslouchá na `http://0.0.0.0:5000`. Otevřete `http://localhost:5000` v prohlížeči a zobrazte nástěnku.
+   Ve výchozím nastavení uzel naslouchá na `http://0.0.0.0:5000`. Otevřete `http://localhost:5000` v prohlížeči a ověřte, že seznam „Local node netlocs“ obsahuje vámi zadané adresy. Pokud se zobrazí chyba `LOCAL_NODE_NETLOCS must be configured`, vraťte se ke kroku 3 a přidejte hostitele, kterého používáte v klientovi.
 
-4. **Spuštění klienta** – Spusťte klienta z jeho adresáře:
+5. **Spuštění klienta** – Spusťte klienta z jeho adresáře:
    ```sh
    cd Blockchain_client
    python blockchain_client.py
    ```
    Klient naslouchá na `http://0.0.0.0:8081`; otevřete `http://localhost:8081` v prohlížeči, abyste generovali klíče, nahrávali soubory nebo prohlíželi transakce.
 
-5. **Úprava adres uzlů v klientovi** – V `Blockchain_client/blockchain_client.py` upravte konstantu `NODE_URL`, aby odpovídala adrese uzlu (například `http://192.168.1.10:5000`). Změňte také `const nodeUrl = "http://127.0.0.1:5000/";` v `Blockchain_client/templates/view_transactions.html`, aby JavaScript cílil na správný uzel.
+6. **Úprava adres uzlů v klientovi** – V `Blockchain_client/blockchain_client.py` upravte konstantu `NODE_URL`, aby odpovídala adrese uzlu (například `http://192.168.1.10:5000`). Změňte také `const nodeUrl = "http://127.0.0.1:5000/";` v `Blockchain_client/templates/view_transactions.html`, aby JavaScript cílil na správný uzel.
 
-6. **Otevírání šifrovaných souborů** – Chcete-li stáhnout dešifrovanou verzi citlivého souboru, zavolejte endpoint `/decrypt/<TX_ID>` (prohlížečem, Postmanem nebo pomocí curl). Uzel odpoví hlavičkou `Content-Disposition: attachment` a názvem `decrypted_<OriginalName>`, soubor si pak můžete uložit.
+7. **Nahrání souboru** – Na stránce „Nahrajte soubor a podepište transakci“ vyplňte údaje o odesílateli/příjemci, zvolte soubor a klikněte na **Odeslat a podepsat**. Pokud klient hlásí `LOCAL_NODE_NETLOCS must be configured`, zkontrolujte, že:
+   - Uzel byl spuštěn se správným seznamem (viz krok 3).
+   - Adresa zobrazená v klientovi odpovídá některé položce seznamu (včetně portu).
+   - Uzel byl po změně proměnných prostředí restartován.
+
+8. **Otevírání šifrovaných souborů** – Chcete-li stáhnout dešifrovanou verzi citlivého souboru, zavolejte endpoint `/decrypt/<TX_ID>` (prohlížečem, Postmanem nebo pomocí curl). Uzel odpoví hlavičkou `Content-Disposition: attachment` a názvem `decrypted_<OriginalName>`, soubor si pak můžete uložit.
 
 ### Správa uzlů
 Jakmile máte spuštěný alespoň jeden uzel (viz **Spuštění uzlu**), můžete cluster spravovat pomocí následujících endpointů. Příklady obsahují syntax pro Linux/macOS (`curl`) i pro Windows (`curl.exe` v Příkazovém řádku nebo PowerShellu). Windows 10 a novější obsahují `curl.exe`; ve starších verzích jej nainstalujte z [curl.se](https://curl.se/windows/) nebo použijte PowerShell `Invoke-RestMethod`.
