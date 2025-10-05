@@ -167,6 +167,24 @@ Trusted nodes can access sensitive data and participate in Proof-of-Authority (P
 - Configure the node’s own address through `/validator/configure` (`netloc` field) or by setting `LOCAL_NODE_NETLOCS` (comma-, space-, or JSON-separated list) before starting the server.
 - Clients must submit uploads using the same host/port combination that peers use to reach the node so that the resulting transactions advertise a reachable file owner.
 
+### Configure auto-mining
+
+By default the node automatically mines a block once **10 pending transactions** accumulate. This behaviour is controlled by the `AUTO_MINE_TRANSACTION_TARGET` environment variable, which is read when the server starts.
+
+- **Change the threshold** – Set the variable to the number of pending transactions you want to trigger auto-mining. Example (Linux/macOS):
+  ```sh
+  export AUTO_MINE_TRANSACTION_TARGET=5
+  python blockchain_node/blockchain.py
+  ```
+  PowerShell:
+  ```powershell
+  $env:AUTO_MINE_TRANSACTION_TARGET = "3"
+  python blockchain_node/blockchain.py
+  ```
+- **Disable auto-mining** – Set `AUTO_MINE_TRANSACTION_TARGET` to `0` (or any negative value). The node keeps queuing transactions until a block is mined manually or by another validator.
+
+Restart the node whenever you change the variable so the new setting is applied.
+
 ### Customising the Network and Testing Multiple Nodes
 #### Change the node IP/port
 1. **Edit the Flask configuration** – In `blockchain_node/blockchain.py` modify the line `app.run(host="0.0.0.0", port=5000)` to the desired port (e.g., `port=5001`) and restart the node.
@@ -390,6 +408,24 @@ Trusted uzly mají přístup k citlivým datům a podílejí se na konsenzu Proo
    ```
 
 > Po každé změně zkontrolujte odpovědi `/nodes/get` a `/trusted_nodes/get` na všech uzlech, aby konfigurace zůstala konzistentní.
+
+### Konfigurace automatického těžení
+
+Ve výchozím nastavení uzel automaticky vytěží blok, jakmile se nahromadí **10 čekajících transakcí**. Toto chování řídí proměnná prostředí `AUTO_MINE_TRANSACTION_TARGET`, která se načítá při startu serveru.
+
+- **Změna prahu** – Nastavte proměnnou na počet čekajících transakcí, při kterých se má těžení spustit. Příklad pro Linux/macOS:
+  ```sh
+  export AUTO_MINE_TRANSACTION_TARGET=5
+  python blockchain_node/blockchain.py
+  ```
+  PowerShell:
+  ```powershell
+  $env:AUTO_MINE_TRANSACTION_TARGET = "3"
+  python blockchain_node/blockchain.py
+  ```
+- **Vypnutí automatického těžení** – Nastavte `AUTO_MINE_TRANSACTION_TARGET` na `0` (nebo libovolnou zápornou hodnotu). Uzel bude transakce pouze frontovat, dokud blok nevytěžíte ručně nebo jej nepodepíše jiný validátor.
+
+Po každé změně proměnné uzel restartujte, aby se nové nastavení projevilo.
 
 ### Přizpůsobení sítě a testování více uzlů
 #### Změna IP/portu uzlu
