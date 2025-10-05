@@ -1661,6 +1661,12 @@ def _require_node_management_authorization():
         return None
     return _node_management_forbidden_response()
 
+
+def _require_trusted_management_authorization():
+    if _request_from_trusted() or _request_from_localhost():
+        return None
+    return _trusted_management_forbidden_response()
+
 @app.route('/')
 def node_index():
     """
@@ -2299,8 +2305,9 @@ def get_nodes():
 
 @app.route('/trusted_nodes/register', methods=['POST'])
 def register_trusted_nodes():
-    if not _request_from_trusted():
-        return _trusted_management_forbidden_response()
+    auth_error = _require_trusted_management_authorization()
+    if auth_error:
+        return auth_error
     node_netlocs = []
 
     payload = request.get_json(silent=True)
@@ -2344,8 +2351,9 @@ def register_trusted_nodes():
 
 @app.route('/trusted_nodes/remove', methods=['POST'])
 def remove_trusted_node():
-    if not _request_from_trusted():
-        return _trusted_management_forbidden_response()
+    auth_error = _require_trusted_management_authorization()
+    if auth_error:
+        return auth_error
     d = request.get_json() or {}
     if 'node' not in d:
         return jsonify({"message":"Missing node address"}),400
