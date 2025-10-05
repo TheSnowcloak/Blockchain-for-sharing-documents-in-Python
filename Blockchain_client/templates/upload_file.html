@@ -117,16 +117,38 @@ document.addEventListener('DOMContentLoaded', () => {
     .then(resp => {
       resultBox.classList.remove('d-none','alert-danger');
       resultBox.classList.add('alert','alert-success');
+      const fragments = [];
       if (resp.message) {
-        resultBox.textContent = "OK: " + resp.message;
-      } else {
-        resultBox.textContent = JSON.stringify(resp);
+        fragments.push(`<strong>${resp.message}</strong>`);
       }
+
+      const meta = [];
+      if (resp.file_name) {
+        meta.push(`File: ${resp.file_name}`);
+      }
+      if (resp.tx_id) {
+        meta.push(`Transaction ID: ${resp.tx_id}`);
+      }
+      if (resp.received_at) {
+        const timestamp = new Date(resp.received_at);
+        const formatted = isNaN(timestamp) ? resp.received_at : timestamp.toLocaleString();
+        meta.push(`Recorded at: ${formatted}`);
+      }
+
+      if (meta.length > 0) {
+        fragments.push('<ul class="mt-2 mb-0">' + meta.map(item => `<li>${item}</li>`).join('') + '</ul>');
+      }
+
+      if (fragments.length === 0) {
+        fragments.push(`<pre class="mb-0">${JSON.stringify(resp, null, 2)}</pre>`);
+      }
+
+      resultBox.innerHTML = fragments.join('');
     })
     .catch(err => {
       resultBox.classList.remove('d-none','alert-success');
       resultBox.classList.add('alert','alert-danger');
-      resultBox.textContent = "Error: " + err;
+      resultBox.textContent = "Error: " + (err?.message || err);
     });
   });
 });

@@ -35,6 +35,7 @@ from werkzeug.utils import secure_filename
 from Crypto.Cipher import AES
 import base64
 
+# Configure logging early so helper utilities can use it
 logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 CORS(app)
@@ -61,9 +62,28 @@ SYNC_BACKOFF_MULTIPLIER = float(os.getenv("SYNC_BACKOFF_MULTIPLIER", "2"))
 SYNC_FAILURE_LOG_SIZE = int(os.getenv("SYNC_FAILURE_LOG_SIZE", "200"))
 SYNC_DEFERRED_RETRY_LIMIT = int(os.getenv("SYNC_DEFERRED_RETRY_LIMIT", "3"))
 SYNC_DEFERRED_RETRY_DELAY = float(os.getenv("SYNC_DEFERRED_RETRY_DELAY", "15"))
+def _load_auto_mine_target():
+    raw_value = os.getenv("AUTO_MINE_TRANSACTION_TARGET", "10")
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        logging.warning(
+            "Invalid AUTO_MINE_TRANSACTION_TARGET=%r. Falling back to 10.",
+            raw_value,
+        )
+        return 10
+
+
+AUTO_MINE_TRANSACTION_TARGET = _load_auto_mine_target()
 
 _LOCAL_HOST_LOCK = threading.Lock()
 _LOCAL_HOST_CACHE = None
+
+
+def _utc_timestamp():
+    """Return an ISO-8601 UTC timestamp with a ``Z`` suffix."""
+
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 def _ensure_safe_filename(name: str) -> str:
     safe_name = secure_filename(name)
@@ -358,6 +378,11 @@ class Blockchain:
         self.validator_private_key_hex = None
         self.validator_netloc = None
         self.validator_key_id = None
+        if AUTO_MINE_TRANSACTION_TARGET <= 0:
+            self.auto_mine_threshold = 0
+            logging.info("Auto-mining disabled (AUTO_MINE_TRANSACTION_TARGET=%s).", AUTO_MINE_TRANSACTION_TARGET)
+        else:
+            self.auto_mine_threshold = AUTO_MINE_TRANSACTION_TARGET
 
         self.load_validator_identity()
 
@@ -429,7 +454,7 @@ class Blockchain:
 
             block = {
                 "index": len(self.chain) + 1,
-                "timestamp": str(datetime.datetime.now()),
+                "timestamp": _utc_timestamp(),
                 "transactions": list(self.transactions),
                 "proof": proof,
                 "previous_hash": previous_hash,
@@ -585,8 +610,13 @@ class Blockchain:
             self.save_data()
 
             mined_block = None
-            if len(self.transactions) >= 5:
-                logging.info("Reached 5 pending TX. Auto-mining new block.")
+            if self.auto_mine_threshold and len(self.transactions) >= self.auto_mine_threshold:
+                logging.info(
+                    "Reached %s pending TX. Auto-mining new block.",
+                    self.auto_mine_threshold,
+                )
+                # Ensure a validator identity exists before attempting to mine.
+                self.ensure_local_validator_identity()
                 last_block = self.last_block
                 prev_hash = self.hash(last_block)
                 try:
@@ -703,7 +733,7 @@ class Blockchain:
 
     def _record_sync_failure(self, operation, netloc, filename=None, error=None, attempt=None, stage="immediate"):
         entry = {
-            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "timestamp": _utc_timestamp(),
             "operation": operation,
             "netloc": netloc,
             "filename": filename,
@@ -1136,7 +1166,7 @@ class Blockchain:
             )
             return False
 
-        if self.validator_netloc and normalize_netloc(self.validator_netloc) not in self.trusted_nodes:
+        if self.validator_netloc and not self._netloc_effectively_trusted(self.validator_netloc):
             return False
 
         return True
@@ -1562,6 +1592,104 @@ class Blockchain:
             }
         return ips
 
+    def _netloc_effectively_trusted(self, candidate_netloc):
+        try:
+            normalized = normalize_netloc(candidate_netloc)
+        except ValueError:
+            return False
+
+        with self._lock:
+            trusted_snapshot = list(self.trusted_nodes)
+
+        if normalized in trusted_snapshot:
+            return True
+
+        try:
+            cand_host, cand_port = _split_host_port(normalized)
+        except ValueError:
+            return False
+
+        candidate_ips = set(self._resolve_host_to_ips(cand_host))
+        candidate_ips.add(cand_host)
+
+        for trusted in trusted_snapshot:
+            try:
+                trusted_host, trusted_port = _split_host_port(trusted)
+            except ValueError:
+                continue
+
+            if trusted_port != cand_port:
+                continue
+
+            if trusted_host == cand_host:
+                return True
+
+            trusted_ips = set(self.get_trusted_netloc_ips(trusted))
+            trusted_ips.add(trusted_host)
+
+            if candidate_ips & trusted_ips:
+                return True
+
+        return False
+
+    def _select_local_validator_netloc(self):
+        known_hosts = set(_get_known_local_hosts())
+
+        with self._lock:
+            trusted_snapshot = list(self.trusted_nodes)
+
+        for netloc in trusted_snapshot:
+            try:
+                host, _ = _split_host_port(netloc)
+            except ValueError:
+                continue
+
+            if host in known_hosts:
+                return netloc
+
+            resolved_ips = set(self.get_trusted_netloc_ips(netloc))
+            if resolved_ips & known_hosts:
+                return netloc
+
+        configured_netlocs = _get_configured_self_netlocs()
+        if configured_netlocs:
+            return configured_netlocs[0]
+
+        return None
+
+    def ensure_local_validator_identity(self):
+        with self._lock:
+            if self.validator_id and self.validator_private_key_hex:
+                return False
+
+        candidate_netloc = self._select_local_validator_netloc()
+        if not candidate_netloc:
+            return False
+
+        try:
+            rsa_key = RSA.generate(2048)
+        except (ValueError, TypeError, OSError) as exc:
+            logging.error("Failed to generate validator key pair: %s", exc)
+            return False
+
+        private_hex = binascii.hexlify(rsa_key.export_key(format='DER')).decode('ascii')
+        public_hex = binascii.hexlify(rsa_key.publickey().export_key(format='DER')).decode('ascii')
+        validator_id = self.validator_id or f"local-validator-{uuid4().hex[:12]}"
+
+        try:
+            self.set_validator_identity(
+                validator_id,
+                private_hex,
+                netloc=candidate_netloc,
+                public_key_hex=public_hex,
+            )
+        except ValueError as exc:
+            logging.error("Failed to configure local validator identity: %s", exc)
+            return False
+
+        logging.info("Generated local validator identity bound to %s", candidate_netloc)
+        return True
+
     @staticmethod
     def _resolve_host_to_ips(host):
         stripped_host = host.strip()
@@ -1730,6 +1858,8 @@ def mine():
     if not (_request_from_trusted() or _request_from_localhost()):
         return jsonify({"message": _MINING_FORBIDDEN_MESSAGE}), 403
 
+    blockchain.ensure_local_validator_identity()
+
     if not blockchain.is_authorized_validator():
         return jsonify({"message": "This node is not authorized to propose blocks."}), 403
 
@@ -1819,6 +1949,8 @@ def node_upload():
         safe_file_name = _ensure_safe_filename(file_name)
     except ValueError:
         return jsonify({"error": "Invalid file_name supplied"}), 400
+
+    received_at = _utc_timestamp()
 
     try:
         canonical_stored_name = _derive_canonical_stored_name(tx_id, safe_file_name)
@@ -1997,28 +2129,44 @@ def node_upload():
                     exc,
                 )
         if location == "pending":
-            message = "File already received and pending confirmation"
+            message = (
+                f"File already received: '{safe_file_name}' is pending confirmation "
+                f"(last update {received_at})."
+            )
         else:
-            message = f"File already received, block = {location}"
+            message = (
+                f"File already accepted in block {location}: '{safe_file_name}' "
+                f"(checked {received_at})."
+            )
         return jsonify({
             "message": message,
             "location": location,
             "added": False,
             "mined": False,
+            "file_name": safe_file_name,
+            "tx_id": tx_id,
+            "received_at": received_at,
         }), 200
 
     if has_encryption_payload and added:
         store_encryption_keys(tx_id, enc_key_b64, enc_nonce_b64, enc_tag_b64)
 
     if mined:
-        message = f"File received and stored in block {location}"
+        message = (
+            f"File '{safe_file_name}' stored in block {location} at {received_at}."
+        )
     else:
-        message = f"File received, pending block {location}"
+        message = (
+            f"File '{safe_file_name}' received at {received_at} and will be added to block {location}."
+        )
     return jsonify({
         "message": message,
         "location": location,
         "added": True,
         "mined": mined,
+        "file_name": safe_file_name,
+        "tx_id": tx_id,
+        "received_at": received_at,
     }), 201
 
 
@@ -2041,6 +2189,9 @@ def new_transaction():
         data["file_name"] = _ensure_safe_filename(data["file_name"])
     except ValueError:
         return "Invalid file_name", 400
+
+    safe_file_name = data["file_name"]
+    received_at = _utc_timestamp()
 
     try:
         canonical_stored_name = _derive_canonical_stored_name(data["tx_id"], data["file_name"])
@@ -2104,25 +2255,41 @@ def new_transaction():
 
     if added:
         if mined:
-            message = f"Transaction added to block {location}"
+            message = (
+                f"File '{safe_file_name}' stored in block {location} at {received_at}."
+            )
         else:
-            message = f"Transaction will be added to block {location}"
+            message = (
+                f"File '{safe_file_name}' received at {received_at} and will be added to block {location}."
+            )
         return jsonify({
             "message": message,
             "location": location,
             "added": True,
             "mined": mined,
+            "file_name": safe_file_name,
+            "tx_id": data["tx_id"],
+            "received_at": received_at,
         }), 201
 
     if location == "pending":
-        message = "Transaction already pending confirmation"
+        message = (
+            f"File already received: '{safe_file_name}' is pending confirmation "
+            f"(last update {received_at})."
+        )
     else:
-        message = f"Transaction already accepted in block {location}"
+        message = (
+            f"File already accepted in block {location}: '{safe_file_name}' "
+            f"(checked {received_at})."
+        )
     return jsonify({
         "message": message,
         "location": location,
         "added": False,
         "mined": False,
+        "file_name": safe_file_name,
+        "tx_id": data["tx_id"],
+        "received_at": received_at,
     }), 200
 
 @app.route('/transactions/get', methods=['GET'])
